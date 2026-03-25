@@ -315,7 +315,10 @@ jobs:
             --verify-signer "$ATTESTATION_PUBLIC_KEY" \
             --policy .github/policies/deploy.rego \
             --output gate-decision.json
-          cat gate-decision.json
+
+      - name: Show gate decision
+        if: always()
+        run: cat gate-decision.json
 
       - name: Upload attestation chain & gate decision
         if: always()
