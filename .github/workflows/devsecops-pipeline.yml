@@ -259,19 +259,13 @@ jobs:
           merge-multiple: true
 
       - name: Install devsecops-attestation CLI
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # Download the latest release binary from the attestation repo
-          LATEST=$(curl -s https://api.github.com/repos/MemerGamer/devsecops-attestation/releases/latest \
-            | jq -r '.tag_name')
-          curl -sL \
-            "https://github.com/MemerGamer/devsecops-attestation/releases/download/${LATEST}/devsecops-attestation_linux_amd64.tar.gz" \
-            -o att.tar.gz
-          tar -xzf att.tar.gz
-          # Move all extracted binaries to /usr/local/bin
-          find . -maxdepth 2 -type f \( -name "sign" -o -name "gate" -o -name "keygen" \) \
-            -exec install -m755 {} /usr/local/bin/ \;
+          # Build from source (no releases published yet)
+          git clone --depth 1 https://github.com/MemerGamer/devsecops-attestation.git /tmp/devsecops-attestation
+          cd /tmp/devsecops-attestation
+          go build -o /usr/local/bin/sign    ./cmd/sign
+          go build -o /usr/local/bin/gate    ./cmd/gate
+          go build -o /usr/local/bin/keygen  ./cmd/keygen
 
       - name: Sign SAST attestation
         env:
