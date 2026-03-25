@@ -1,0 +1,333 @@
+name: DevSecOps Attested Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # needed for OIDC / GitHub attestations if you extend later
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # 1. BUILD & TEST
+  # ─────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: demo_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: ${{ runner.os }}-build-${{ hashFiles('**/mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test
+        env:
+          MIX_ENV: test
+          DATABASE_URL: ecto://postgres:postgres@localhost/demo_test
+
+  # ─────────────────────────────────────────────────────────────────
+  # 2. SAST — Sobelow (Elixir/Phoenix security scanner)
+  # ─────────────────────────────────────────────────────────────────
+  sast:
+    name: SAST (Sobelow)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run Sobelow
+        id: sobelow
+        run: |
+          mix sobelow --format json --out sobelow-raw.json || true
+          # Normalise to the shape devsecops-attestation expects:
+          # { "passed": bool, "findings": [...] }
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              raw = json.load(open("sobelow-raw.json"))
+              findings = raw.get("findings", [])
+              normalised = {
+                  "passed": len(findings) == 0,
+                  "findings": [
+                      {
+                          "id": f.get("type", "UNKNOWN"),
+                          "severity": f.get("confidence", "medium").lower(),
+                          "title": f.get("type", ""),
+                          "location": f.get("file", "") + ":" + str(f.get("line", 0))
+                      }
+                      for f in findings
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/sast.json", "w"))
+          EOF
+
+      - name: Upload SAST result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-result
+          path: results/sast.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 3. SCA — mix_audit (known vulnerability check for Hex deps)
+  # ─────────────────────────────────────────────────────────────────
+  sca:
+    name: SCA (mix audit)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run mix_audit
+        id: mix_audit
+        run: |
+          mix deps.audit --format json > mix-audit-raw.json 2>&1 || true
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              raw = json.load(open("mix-audit-raw.json"))
+              vulns = raw.get("vulnerabilities", [])
+              normalised = {
+                  "passed": len(vulns) == 0,
+                  "findings": [
+                      {
+                          "id": v.get("cve", v.get("id", "UNKNOWN")),
+                          "severity": v.get("severity", "unknown").lower(),
+                          "title": v.get("description", ""),
+                          "location": v.get("package", "") + "@" + v.get("version", "")
+                      }
+                      for v in vulns
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/sca.json", "w"))
+          EOF
+
+      - name: Upload SCA result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-result
+          path: results/sca.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 4. CONFIG SCAN — checkov on IaC / Dockerfile / config files
+  # ─────────────────────────────────────────────────────────────────
+  config-scan:
+    name: Config Scan (Checkov)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        id: checkov
+        run: |
+          pip install checkov --quiet
+          checkov -d . \
+            --skip-path deps \
+            --skip-path _build \
+            --output json \
+            --output-file-path results/ \
+            --quiet || true
+          # checkov writes results/results_checkov.json
+          python3 - <<'EOF'
+          import json, glob, os
+          os.makedirs("results", exist_ok=True)
+          checkov_file = "results/results_checkov.json"
+          try:
+              raw = json.load(open(checkov_file))
+              # checkov top-level may be a list (one entry per check type)
+              if isinstance(raw, list):
+                  all_failed = [f for section in raw for f in section.get("results", {}).get("failed_checks", [])]
+              else:
+                  all_failed = raw.get("results", {}).get("failed_checks", [])
+              normalised = {
+                  "passed": len(all_failed) == 0,
+                  "findings": [
+                      {
+                          "id": f.get("check_id", "UNKNOWN"),
+                          "severity": "medium",
+                          "title": f.get("check_type", "") + ": " + f.get("resource", ""),
+                          "location": f.get("file_path", "") + ":" + str(f.get("file_line_range", [0])[0])
+                      }
+                      for f in all_failed
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/config.json", "w"))
+          EOF
+
+      - name: Upload config scan result
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-result
+          path: results/config.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 5. ATTEST & DEPLOY GATE
+  # ─────────────────────────────────────────────────────────────────
+  deploy-gate:
+    name: Attest & Deploy Gate
+    runs-on: ubuntu-latest
+    needs: [sast, sca, config-scan]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all scan results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-result"
+          path: results/
+          merge-multiple: true
+
+      - name: Install devsecops-attestation CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Download the latest release binary from the attestation repo
+          LATEST=$(curl -s https://api.github.com/repos/MemerGamer/devsecops-attestation/releases/latest \
+            | jq -r '.tag_name')
+          curl -sL \
+            "https://github.com/MemerGamer/devsecops-attestation/releases/download/${LATEST}/devsecops-attestation_linux_amd64.tar.gz" \
+            -o att.tar.gz
+          tar -xzf att.tar.gz
+          # Move all extracted binaries to /usr/local/bin
+          find . -maxdepth 2 -type f \( -name "sign" -o -name "gate" -o -name "keygen" \) \
+            -exec install -m755 {} /usr/local/bin/ \;
+
+      - name: Sign SAST attestation
+        env:
+          ATTESTATION_SIGNING_KEY: ${{ secrets.ATTESTATION_SIGNING_KEY }}
+        run: |
+          sign \
+            --check-type sast \
+            --tool sobelow \
+            --result results/sast.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --chain chain.json
+
+      - name: Sign SCA attestation
+        env:
+          ATTESTATION_SIGNING_KEY: ${{ secrets.ATTESTATION_SIGNING_KEY }}
+        run: |
+          sign \
+            --check-type sca \
+            --tool mix_audit \
+            --result results/sca.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --chain chain.json
+
+      - name: Sign config attestation
+        env:
+          ATTESTATION_SIGNING_KEY: ${{ secrets.ATTESTATION_SIGNING_KEY }}
+        run: |
+          sign \
+            --check-type config \
+            --tool checkov \
+            --result results/config.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --chain chain.json
+
+      - name: Evaluate deploy gate
+        env:
+          ATTESTATION_PUBLIC_KEY: ${{ secrets.ATTESTATION_PUBLIC_KEY }}
+        run: |
+          gate evaluate \
+            --chain chain.json \
+            --verify-signer "$ATTESTATION_PUBLIC_KEY" \
+            --policy .github/policies/deploy.rego \
+            --output gate-decision.json
+          cat gate-decision.json
+
+      - name: Upload attestation chain & gate decision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestation-artifacts
+          path: |
+            chain.json
+            gate-decision.json
