@@ -10,6 +10,9 @@ permissions:
   contents: read
   id-token: write   # needed for OIDC / GitHub attestations if you extend later
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ─────────────────────────────────────────────────────────────────
   # 1. BUILD & TEST
@@ -277,7 +280,7 @@ jobs:
             --result results/sast.json \
             --target-ref ${{ github.sha }} \
             --subject ${{ github.repository }} \
-            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --signing-key "$(echo "$ATTESTATION_SIGNING_KEY" | tr -d '[:space:]')" \
             --chain chain.json
 
       - name: Sign SCA attestation
@@ -290,7 +293,7 @@ jobs:
             --result results/sca.json \
             --target-ref ${{ github.sha }} \
             --subject ${{ github.repository }} \
-            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --signing-key "$(echo "$ATTESTATION_SIGNING_KEY" | tr -d '[:space:]')" \
             --chain chain.json
 
       - name: Sign config attestation
@@ -303,7 +306,7 @@ jobs:
             --result results/config.json \
             --target-ref ${{ github.sha }} \
             --subject ${{ github.repository }} \
-            --signing-key "$ATTESTATION_SIGNING_KEY" \
+            --signing-key "$(echo "$ATTESTATION_SIGNING_KEY" | tr -d '[:space:]')" \
             --chain chain.json
 
       - name: Evaluate deploy gate
@@ -312,7 +315,7 @@ jobs:
         run: |
           gate evaluate \
             --chain chain.json \
-            --verify-signer "$ATTESTATION_PUBLIC_KEY" \
+            --verify-signer "$(echo "$ATTESTATION_PUBLIC_KEY" | tr -d '[:space:]')" \
             --policy .github/policies/deploy.rego \
             --output gate-decision.json
 
