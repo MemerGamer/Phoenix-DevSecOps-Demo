@@ -1,4 +1,4 @@
-package deploy
+package devsecops.gate
 
 import rego.v1
 

@@ -41,3 +41,9 @@ npm-debug.log
 
 # ElixirLS
 .elixir_ls/
+
+# act local testing
+.actrc
+.act.env
+.secrets
+push.json
