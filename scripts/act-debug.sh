@@ -36,14 +36,22 @@ if [ ! -f "$BINS_DIR/sign" ] || [ ! -f "$BINS_DIR/gate" ] || [ ! -f "$BINS_DIR/k
   echo "Binaries built in $BINS_DIR"
 fi
 
-# ── Generate test keys if .secrets is missing ─────────────────────────────────
+# ── Generate per-check-type test keys if .secrets is missing ─────────────────
 if [ ! -f "$SECRETS_FILE" ]; then
-  echo "Generating test signing keys..."
+  echo "Generating per-check-type signing keys..."
   mkdir -p "$KEYS_DIR"
-  "$BINS_DIR/keygen" --out "$KEYS_DIR" --force
+  for check in sast sca config secret; do
+    "$BINS_DIR/keygen" --out "$KEYS_DIR/$check" --force
+  done
   {
-    echo "ATTESTATION_SIGNING_KEY=$(cat "$KEYS_DIR/private.hex")"
-    echo "ATTESTATION_PUBLIC_KEY=$(cat "$KEYS_DIR/public.hex")"
+    echo "SAST_SIGNING_KEY=$(cat "$KEYS_DIR/sast/private.hex")"
+    echo "SCA_SIGNING_KEY=$(cat "$KEYS_DIR/sca/private.hex")"
+    echo "CONFIG_SIGNING_KEY=$(cat "$KEYS_DIR/config/private.hex")"
+    echo "SECRET_SCANNING_SIGNING_KEY=$(cat "$KEYS_DIR/secret/private.hex")"
+    echo "SAST_PUBLIC_KEY=$(cat "$KEYS_DIR/sast/public.hex")"
+    echo "SCA_PUBLIC_KEY=$(cat "$KEYS_DIR/sca/public.hex")"
+    echo "CONFIG_PUBLIC_KEY=$(cat "$KEYS_DIR/config/public.hex")"
+    echo "SECRET_SCANNING_PUBLIC_KEY=$(cat "$KEYS_DIR/secret/public.hex")"
   } > "$SECRETS_FILE"
   echo "Keys written to $SECRETS_FILE"
 fi
