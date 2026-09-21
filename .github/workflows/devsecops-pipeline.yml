@@ -8,12 +8,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # needed for OIDC / GitHub attestations if you extend later
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # GitHub Actions run URL embedded in each attestation as a transparency log reference.
-  LOG_ENTRY_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
@@ -24,7 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # Pinned to the postgres:16.15 multi-arch index digest, resolved via
+        # `docker pull postgres:16.15 && docker inspect --format
+        # '{{index .RepoDigests 0}}' postgres:16.15`. postgres:16 and
+        # postgres:16.15 resolved to the same digest at pin time.
+        image: postgres:16.15@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -37,23 +35,25 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1.23.0
+        uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
         with:
           elixir-version: "1.19"
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - name: Cache build
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: _build
           key: ${{ runner.os }}-build-${{ hashFiles('**/mix.lock') }}
@@ -68,10 +68,17 @@ jobs:
         run: mix test
         env:
           MIX_ENV: test
-          DATABASE_URL: ecto://postgres:postgres@localhost/demo_test
 
   # ─────────────────────────────────────────────────────────────────
-  # 2. SAST — Sobelow (Elixir/Phoenix security scanner)
+  # 2. SAST - Sobelow (Elixir/Phoenix security scanner)
+  #
+  # Only the raw JSON report is produced here. Normalization happens in
+  # the deploy-gate job via devsecops-attestation's normalize-sign
+  # action, which uses the sobelow adapter (pkg/normalize/sobelow.go).
+  # That adapter reads sobelow's confidence-bucketed findings object
+  # directly. The previous inline Python normalizer treated `findings`
+  # as a flat list, which never matched sobelow's real JSON shape, so
+  # SAST silently reported zero findings regardless of scan results.
   # ─────────────────────────────────────────────────────────────────
   sast:
     name: SAST (Sobelow)
@@ -79,60 +86,74 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1.23.0
+        uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
         with:
           elixir-version: "1.19"
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
 
+      # Keyed with MIX_ENV (dev, since neither this step nor the
+      # compile step below overrides it) so this cache never collides
+      # with the build job's dev/test _build cache.
+      - name: Cache build
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: _build
+          key: ${{ runner.os }}-build-dev-${{ hashFiles('**/mix.lock') }}
+
       - name: Install dependencies
         run: mix deps.get
 
+      # Compiling here, in its own step, keeps the `==> dep` /
+      # `Compiling` / `Generated` lines that mix prints during
+      # compilation out of the redirected JSON below. Sobelow triggers
+      # compilation itself on first run, so without this step those
+      # lines land on stdout ahead of the JSON report and corrupt it
+      # (the attestation normalizer uses json.Unmarshal and would
+      # error on the mixed output).
+      - name: Compile project
+        run: mix compile
+
       - name: Run Sobelow
-        id: sobelow
         run: |
           mkdir -p results
-          mix sobelow --format json > sobelow-raw.json || true
-          # Normalise to the shape devsecops-attestation expects:
-          # { "passed": bool, "findings": [...] }
-          python3 - <<'EOF'
-          import json, sys
-          try:
-              raw = json.load(open("sobelow-raw.json"))
-              findings = raw.get("findings", [])
-              normalised = {
-                  "passed": len(findings) == 0,
-                  "findings": [
-                      {
-                          "id": f.get("type", "UNKNOWN"),
-                          "severity": f.get("confidence", "medium").lower(),
-                          "title": f.get("type", ""),
-                          "location": f.get("file", "") + ":" + str(f.get("line", 0))
-                      }
-                      for f in findings
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/sast.json", "w"))
-          EOF
+          # --private skips the update-check banner. --exit defaults to
+          # false, so a clean scan already exits 0; the `|| true` only
+          # tolerates a scan-time crash so the file-exists check below
+          # fails with a clear message instead of an opaque step failure.
+          # Sobelow 0.14.1 (the version pinned in mix.lock) supports
+          # --out to write the report directly to a file, so the JSON
+          # never touches stdout in the first place; the compile step
+          # above still guards against any other tool printing to
+          # stdout/stderr in a way that could interfere with this step.
+          mix sobelow --format json --private --out results/sobelow.json || true
+          if [ ! -s results/sobelow.json ]; then
+            echo "sobelow produced no output" >&2
+            exit 1
+          fi
+          if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))' results/sobelow.json; then
+            echo "sobelow output is not valid JSON (likely corrupted by compiler output)" >&2
+            exit 1
+          fi
 
-      - name: Upload SAST result
-        uses: actions/upload-artifact@v4
+      - name: Upload SAST raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sast-result
-          path: results/sast.json
+          name: sast-raw
+          path: results/sobelow.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 3. SCA — mix_audit (known vulnerability check for Hex deps)
+  # 3. SCA - mix_audit (known vulnerability check for Hex deps)
   # ─────────────────────────────────────────────────────────────────
   sca:
     name: SCA (mix audit)
@@ -140,58 +161,67 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
-        uses: erlef/setup-beam@v1.23.0
+        uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
         with:
           elixir-version: "1.19"
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
 
+      # Keyed with MIX_ENV (dev, since neither this step nor the
+      # compile step below overrides it) so this cache never collides
+      # with the build job's dev/test _build cache.
+      - name: Cache build
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: _build
+          key: ${{ runner.os }}-build-dev-${{ hashFiles('**/mix.lock') }}
+
       - name: Install dependencies
         run: mix deps.get
 
+      # See the equivalent step in the sast job: compiling here, in its
+      # own step, keeps mix's `==> dep` / `Compiling` / `Generated`
+      # lines off the stdout stream that is redirected into JSON below.
+      - name: Compile project
+        run: mix compile
+
       - name: Run mix_audit
-        id: mix_audit
         run: |
           mkdir -p results
-          mix deps.audit --format json > mix-audit-raw.json 2>&1 || true
-          python3 - <<'EOF'
-          import json, sys
-          try:
-              raw = json.load(open("mix-audit-raw.json"))
-              vulns = raw.get("vulnerabilities", [])
-              normalised = {
-                  "passed": len(vulns) == 0,
-                  "findings": [
-                      {
-                          "id": v.get("cve", v.get("id", "UNKNOWN")),
-                          "severity": v.get("severity", "unknown").lower(),
-                          "title": v.get("description", ""),
-                          "location": v.get("package", "") + "@" + v.get("version", "")
-                      }
-                      for v in vulns
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/sca.json", "w"))
-          EOF
+          # mix_audit (mix deps.audit) has no documented output-file
+          # option, so the report is captured via stdout redirection;
+          # the compile step above keeps that stream clean. The JSON
+          # validation below still catches any corruption so the
+          # scanner job fails here with a clear message instead of the
+          # attestation normalizer failing opaquely downstream.
+          mix deps.audit --format json > results/mix-audit.json || true
+          if [ ! -s results/mix-audit.json ]; then
+            echo "mix_audit produced no output" >&2
+            exit 1
+          fi
+          if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))' results/mix-audit.json; then
+            echo "mix_audit output is not valid JSON (likely corrupted by compiler output)" >&2
+            exit 1
+          fi
 
-      - name: Upload SCA result
-        uses: actions/upload-artifact@v4
+      - name: Upload SCA raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sca-result
-          path: results/sca.json
+          name: sca-raw
+          path: results/mix-audit.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 4. CONFIG SCAN — checkov on IaC / Dockerfile / config files
+  # 4. CONFIG SCAN - checkov on IaC / Dockerfile / config files
   # ─────────────────────────────────────────────────────────────────
   config-scan:
     name: Config Scan (Checkov)
@@ -199,195 +229,250 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Run Checkov
-        id: checkov
         run: |
-          pip install checkov --quiet
+          mkdir -p results
+          # Pinned to the latest release resolved from
+          # https://pypi.org/pypi/checkov/json at the time this workflow
+          # was last updated.
+          pip install --quiet checkov==3.3.19
           checkov -d . \
             --skip-path deps \
             --skip-path _build \
             --output json \
             --output-file-path results/ \
             --quiet || true
-          # checkov writes results/results_checkov.json
-          python3 - <<'EOF'
-          import json, glob, os
-          os.makedirs("results", exist_ok=True)
-          checkov_file = "results/results_checkov.json"
-          try:
-              raw = json.load(open(checkov_file))
-              # checkov top-level may be a list (one entry per check type)
-              if isinstance(raw, list):
-                  all_failed = [f for section in raw for f in section.get("results", {}).get("failed_checks", [])]
-              else:
-                  all_failed = raw.get("results", {}).get("failed_checks", [])
-              normalised = {
-                  "passed": len(all_failed) == 0,
-                  "findings": [
-                      {
-                          "id": f.get("check_id", "UNKNOWN"),
-                          "severity": "medium",
-                          "title": f.get("check_type", "") + ": " + f.get("resource", ""),
-                          "location": f.get("file_path", "") + ":" + str(f.get("file_line_range", [0])[0])
-                      }
-                      for f in all_failed
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/config.json", "w"))
-          EOF
+          # checkov writes results/results_json.json for --output json.
+          if [ ! -s results/results_json.json ]; then
+            echo "checkov produced no output" >&2
+            exit 1
+          fi
+          mv results/results_json.json results/checkov.json
 
-      - name: Upload config scan result
-        uses: actions/upload-artifact@v4
+      - name: Upload config scan raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: config-result
-          path: results/config.json
+          name: config-raw
+          path: results/checkov.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 5. SECRET SCAN — gitleaks (hardcoded credential detection)
+  # 5. SECRET SCAN - gitleaks (hardcoded credential detection)
   # ─────────────────────────────────────────────────────────────────
   secret-scan:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
     needs: build
     env:
-      GITLEAKS_VERSION: "8.21.2"
+      GITLEAKS_VERSION: "8.30.1"
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz from that
+      # release's checksums.txt.
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c -
+          tar xz -f "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
 
       - name: Run Gitleaks
-        id: gitleaks
         run: |
           mkdir -p results
-          wget -qO- \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar xz gitleaks || true
-          sudo mv gitleaks /usr/local/bin/ 2>/dev/null || true
-          gitleaks detect --report-format json --report-path gitleaks-raw.json || true
-          if jq -e 'if . == null then empty else . end' gitleaks-raw.json >/dev/null 2>&1; then
-            jq '{
-              passed: (length == 0),
-              findings: [.[] | {
-                id: .RuleID,
-                severity: "high",
-                title: .Description,
-                location: (.File + ":" + (.StartLine | tostring))
-              }]
-            }' gitleaks-raw.json > results/secret.json
-          else
-            echo '{"passed":true,"findings":[]}' > results/secret.json
+          gitleaks detect --report-format json --report-path results/gitleaks.json || true
+          if [ ! -f results/gitleaks.json ]; then
+            echo "gitleaks produced no output" >&2
+            exit 1
           fi
 
-      - name: Upload secret scan result
-        uses: actions/upload-artifact@v4
+      - name: Upload secret scan raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: secret-result
-          path: results/secret.json
+          name: secret-raw
+          path: results/gitleaks.json
 
   # ─────────────────────────────────────────────────────────────────
   # 6. ATTEST & DEPLOY GATE
+  #
+  # Reuses devsecops-attestation's composite actions instead of cloning
+  # and building the attestation CLI from source.
   # ─────────────────────────────────────────────────────────────────
   deploy-gate:
     name: Attest & Deploy Gate
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
     environment: production
+    # Dependabot-triggered runs do not get repository secrets (GitHub
+    # withholds them from the dependabot actor for security), so every
+    # signing-key input below would be empty and this job would abort on
+    # every dependabot PR. Since the job also targets the production
+    # environment, an empty run would additionally sit waiting on required
+    # reviewers instead of failing fast. Skip the job entirely for
+    # dependabot.
+    #
+    # Fork PRs are also excluded: `pull_request` runs from a fork carry no
+    # repository secrets either (same GitHub behavior as dependabot, minus
+    # the actor check), so a fork PR would hit the same empty-secret abort,
+    # and letting a fork-authored workflow edit reach a job that reads
+    # signing-key secrets is a needless exposure even when the run would
+    # fail anyway. `github.event.pull_request.head.repo.full_name ==
+    # github.repository` is false for a fork PR and absent (so short-circuited
+    # to the push branch) on a plain push. The scanner jobs above are
+    # unaffected and still run and report findings on every PR, including
+    # dependabot's and forks'.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      # No actions/checkout: this job only consumes uploaded scan-result
+      # artifacts and produces a fresh attestation chain, and the composite
+      # actions below are referenced remotely (uses:), so nothing in this
+      # job reads from a local checkout of this repository.
 
-      - name: Download all scan results
-        uses: actions/download-artifact@v4
+      # Written under runner.temp (not the job workspace) so the attestation
+      # chain and gate decision never collide with, or get mistaken for,
+      # checked-out repository content -- there is none, per above. The
+      # `runner` context is not available in a job-level `env:` block, so
+      # the paths are computed here and exported via GITHUB_ENV instead,
+      # for the later steps' `${{ env.* }}` expressions to pick up.
+      - name: Set scratch paths
+        run: |
+          echo "CHAIN_PATH=${RUNNER_TEMP}/attestation-chain.json" >> "$GITHUB_ENV"
+          echo "GATE_OUTPUT_PATH=${RUNNER_TEMP}/gate-decision.json" >> "$GITHUB_ENV"
+
+      # Downloaded into per-check-type directories (not a single
+      # pattern-matched, merge-multiple download into the shared workspace)
+      # so a same-named raw result from one check type can never overwrite,
+      # or be silently shadowed by, another's during download.
+      - name: Download SAST raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "*-result"
-          path: results/
-          merge-multiple: true
+          name: sast-raw
+          path: raw/sast
 
-      - name: Install devsecops-attestation CLI
-        run: |
-          # Build from source (always pulls latest main with zero-trust flags)
-          git clone --depth 1 https://github.com/MemerGamer/devsecops-attestation.git /tmp/devsecops-attestation
-          cd /tmp/devsecops-attestation
-          go build -o /usr/local/bin/sign    ./cmd/sign
-          go build -o /usr/local/bin/gate    ./cmd/gate
-          go build -o /usr/local/bin/keygen  ./cmd/keygen
+      - name: Download SCA raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sca-raw
+          path: raw/sca
 
-      - name: Sign SAST attestation
-        run: |
-          sign \
-            --check-type sast \
-            --tool sobelow \
-            --result results/sast.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SAST_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      - name: Download config scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: config-raw
+          path: raw/config
 
-      - name: Sign SCA attestation
-        run: |
-          sign \
-            --check-type sca \
-            --tool mix_audit \
-            --result results/sca.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SCA_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      - name: Download secret scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: secret-raw
+          path: raw/secret
 
-      - name: Sign config attestation
-        run: |
-          sign \
-            --check-type config \
-            --tool checkov \
-            --result results/config.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.CONFIG_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      # Installs cosign so actions/setup's verify-signature: "true" below can
+      # check the downloaded release checksums.txt against its Sigstore
+      # bundle (checksums.txt.sigstore.json) before anything in this job
+      # trusts it. Pinned to sigstore/cosign-installer v4.1.2 by full commit
+      # SHA, resolved via `git ls-remote --tags
+      # https://github.com/sigstore/cosign-installer.git`.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign secret scan attestation
-        run: |
-          sign \
-            --check-type secret \
-            --tool gitleaks \
-            --result results/secret.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SECRET_SCANNING_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      # SHA and version must be bumped together when upgrading.
+      - uses: MemerGamer/devsecops-attestation/actions/setup@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          version: 0.4.0
+          verify-signature: "true"
 
-      - name: Evaluate deploy gate
-        run: |
-          gate evaluate \
-            --chain chain.json \
-            --authorized-signers "sast=${{ secrets.SAST_PUBLIC_KEY }},sca=${{ secrets.SCA_PUBLIC_KEY }},config=${{ secrets.CONFIG_PUBLIC_KEY }},secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}" \
-            --policy .github/policies/deploy.rego \
-            --policy-hash a547bf1811ee7596266769d9729f5c78037e1f3f947f955e59814ff3861d8635 \
-            --max-age 24h \
-            --require-log-entries \
-            --output gate-decision.json
+      # SHA and version must be bumped together when upgrading.
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: sobelow
+          raw-result: raw/sast/sobelow.json
+          check-type: sast
+          signing-key: ${{ secrets.SAST_SIGNING_KEY }}
+          chain: ${{ env.CHAIN_PATH }}
+
+      # SHA and version must be bumped together when upgrading.
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: mix-audit
+          raw-result: raw/sca/mix-audit.json
+          check-type: sca
+          signing-key: ${{ secrets.SCA_SIGNING_KEY }}
+          chain: ${{ env.CHAIN_PATH }}
+
+      # SHA and version must be bumped together when upgrading.
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: checkov
+          raw-result: raw/config/checkov.json
+          check-type: config
+          signing-key: ${{ secrets.CONFIG_SIGNING_KEY }}
+          chain: ${{ env.CHAIN_PATH }}
+
+      # SHA and version must be bumped together when upgrading.
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: gitleaks
+          raw-result: raw/secret/gitleaks.json
+          check-type: secret
+          signing-key: ${{ secrets.SECRET_SCANNING_SIGNING_KEY }}
+          chain: ${{ env.CHAIN_PATH }}
+
+      # SHA and version must be bumped together when upgrading.
+      # No --policy / policy-hash: `gate evaluate` with no --policy uses the
+      # canonical deploy.rego policy compiled into the gate binary itself
+      # (policy.DefaultPolicy, embedded from policies/deploy.rego at build
+      # time), not the copy of deploy.rego that actions/setup separately
+      # downloads and installs alongside the binaries. The downloaded copy
+      # is there for inspection, or for a caller that wants to pass it via
+      # --policy explicitly; this workflow does not, so the embedded policy
+      # is what actually evaluates every run.
+      #
+      # expect: deny -- this demo intentionally ships hardcoded
+      # secret_key_base literals in config/dev.exs and config/test.exs
+      # (see commit "fix: block deployment on any hardcoded credential
+      # finding"). gitleaks findings are always normalized to critical
+      # severity (pkg/normalize's gitleaks adapter), and the embedded
+      # policy treats "secret" as a zero-tolerance check type, so the
+      # gate is expected to deny every run. This demonstrates the
+      # pipeline actually blocking on a real finding, not just passing.
+      # Nothing is deployed either way: there is no deploy step in this
+      # workflow. "Deploy Gate" names the security gate a real deploy step
+      # would sit behind; passing this job (an allow decision under
+      # expect: allow, or the expected deny under expect: deny) is the
+      # extent of what the pipeline does.
+      - uses: MemerGamer/devsecops-attestation/actions/gate@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          chain: ${{ env.CHAIN_PATH }}
+          authorized-signers: >-
+            sast=${{ secrets.SAST_PUBLIC_KEY }},
+            sca=${{ secrets.SCA_PUBLIC_KEY }},
+            config=${{ secrets.CONFIG_PUBLIC_KEY }},
+            secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}
+          max-age: 24h
+          require-log-entries: "true"
+          expect: deny
+          output: ${{ env.GATE_OUTPUT_PATH }}
 
       - name: Show gate decision
         if: always()
-        run: cat gate-decision.json
+        run: cat "$GATE_OUTPUT_PATH"
 
       - name: Upload attestation chain & gate decision
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: attestation-artifacts
           path: |
-            chain.json
-            gate-decision.json
+            ${{ env.CHAIN_PATH }}
+            ${{ env.GATE_OUTPUT_PATH }}
