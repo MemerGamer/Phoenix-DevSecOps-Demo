@@ -2,7 +2,7 @@
 # Elixir 1.19 / OTP 28, matching mix.exs (elixir: "~> 1.19") and the CI
 # workflow's erlef/setup-beam versions. Pinned by digest, resolved from
 # hexpm/elixir:1.19.6-erlang-28.5.0.6-debian-bookworm-20260918-slim.
-FROM hexpm/elixir@sha256:8713308eb471a5f84aa55a22cf265d5f652629de747af83b22cc27706fe0c8f6 AS build
+FROM hexpm/elixir:1.19.6-erlang-28.5.0.6-debian-bookworm-20260918-slim@sha256:8713308eb471a5f84aa55a22cf265d5f652629de747af83b22cc27706fe0c8f6 AS build
 
 WORKDIR /app
 
@@ -42,7 +42,7 @@ RUN mix release
 # runtime image and its attack surface. Add curl (or a lightweight
 # Elixir-based check via the release's remote console) if a
 # HEALTHCHECK becomes required.
-FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM debian:bookworm-20260918-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 RUN apt-get update -y && \
     apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates && \
@@ -56,8 +56,11 @@ ENV LC_ALL=en_US.UTF-8
 
 WORKDIR /app
 
-# Run as non-root user
-RUN useradd --create-home app
+# Run as non-root user. Ownership of /app itself is fixed up here (mirroring
+# phx.gen.release's generated Dockerfile) so the app user can write to its
+# own working directory at runtime, not just the release files copied into
+# it below.
+RUN useradd --create-home app && chown app:app /app
 USER app
 
 COPY --from=build --chown=app:app /app/_build/prod/rel/demo ./

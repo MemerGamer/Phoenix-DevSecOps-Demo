@@ -3,19 +3,25 @@
 # Run from the repo root: bash scripts/act-debug.sh [job]
 # If no job is given, runs all jobs in order.
 #
-# The deploy-gate job's `uses: MemerGamer/devsecops-attestation/actions/...`
-# steps download a release archive from GitHub Releases. Until v0.4.0 is
-# published there is nothing to download, so a plain `act` run of
-# deploy-gate will fail at the setup action. Point act at a local checkout
-# of devsecops-attestation instead, with (recent act versions only):
+# IMPORTANT: the deploy-gate job cannot run under act until a
+# devsecops-attestation v0.4.0 GitHub release actually exists. Its
+# `uses: MemerGamer/devsecops-attestation/actions/...@v0.4.0` steps call
+# actions/setup, which downloads a release archive from GitHub Releases;
+# with no v0.4.0 release published, that download 404s no matter what act
+# flags are passed. `--local-repository` only redirects where the *action
+# definition* (action.yml) is resolved from -- it does not change what
+# actions/setup itself downloads at runtime, since that is a plain `curl`
+# inside setup.sh pointed at download-base-url / the release tag. So
+# `--local-repository` alone does NOT make deploy-gate work under act.
 #
-#   act push -e push.json \
-#     --local-repository MemerGamer/devsecops-attestation@v0.4.0="$ATTESTATION_SRC"
-#
-# Check `act --help` for `--local-repository` / `-l` support in your
-# installed version; older act releases do not have it, in which case the
-# composite actions must be exercised directly (see
-# devsecops-attestation/actions/test/run-local.sh) rather than through act.
+# The only way to exercise deploy-gate locally today is to temporarily edit
+# the workflow so the setup step uses `version: source` instead of
+# `version: 0.4.0` (see actions/setup/action.yml in devsecops-attestation),
+# which builds the CLI binaries from the local checkout with `go build`
+# instead of downloading a release archive. That requires Go on the
+# runner's PATH. Do not commit that workflow edit; revert it once you are
+# done debugging. Once v0.4.0 is released, the pinned `@v0.4.0` steps will
+# resolve normally.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,7 +74,19 @@ fi
 # NAME=value pair per line, corresponding to the repository secrets the
 # workflow expects (SAST_SIGNING_KEY, SCA_SIGNING_KEY, CONFIG_SIGNING_KEY,
 # SECRET_SCANNING_SIGNING_KEY, and their *_PUBLIC_KEY counterparts).
+#
+# .secrets is gitignored. A missing file fails loudly by default instead of
+# silently generating one, since a missing file usually means secrets were
+# never set up rather than that a keyless run was intended. Set
+# ALLOW_NO_SECRETS=1 to opt in explicitly; that generates fresh
+# per-check-type test signing keys into .secrets.
 if [ ! -f "$SECRETS_FILE" ]; then
+  if [ "${ALLOW_NO_SECRETS:-0}" != "1" ]; then
+    echo "ERROR: $SECRETS_FILE not found." >&2
+    echo "Set ALLOW_NO_SECRETS=1 to generate per-check-type test signing" >&2
+    echo "keys automatically and proceed." >&2
+    exit 1
+  fi
   echo "Generating per-check-type signing keys..."
   mkdir -p "$KEYS_DIR"
   for check in sast sca config secret; do
@@ -89,17 +107,31 @@ fi
 
 mkdir -p "$ARTIFACTS_DIR"
 
+# ── Generate a minimal push event payload if missing ────────────────────────
+# push.json is gitignored (it is a local act input, not workflow config).
+# act needs an event payload for `act push`; a minimal push event with just
+# a ref is enough to satisfy the workflow's `on.push.branches` filter.
+PUSH_EVENT_FILE="$REPO_DIR/push.json"
+if [ ! -f "$PUSH_EVENT_FILE" ]; then
+  echo "Generating minimal push event payload at $PUSH_EVENT_FILE..."
+  printf '{"ref":"refs/heads/main"}\n' > "$PUSH_EVENT_FILE"
+fi
+
 # ── Run act ───────────────────────────────────────────────────────────────
 JOB="${1:-}"
-ACT_CMD=(act push -e push.json --secret-file "$SECRETS_FILE")
+ACT_CMD=(act push -e "$PUSH_EVENT_FILE" --secret-file "$SECRETS_FILE" --artifact-server-path "$ARTIFACTS_DIR")
 
-if command -v act >/dev/null 2>&1 && act --help 2>&1 | grep -q -- '--local-repository'; then
-  ACT_CMD+=(--local-repository "MemerGamer/devsecops-attestation@v0.4.0=$ATTESTATION_SRC")
-else
-  echo "NOTE: installed act has no --local-repository support (or act is not" >&2
-  echo "installed); the deploy-gate job's setup/normalize-sign/gate steps will" >&2
-  echo "fail to resolve until v0.4.0 is published, unless you add that flag" >&2
-  echo "manually. See the comment at the top of this script." >&2
+# See the header comment: deploy-gate cannot run under act until
+# devsecops-attestation v0.4.0 is released, no matter which act flags are
+# passed, because actions/setup downloads a release archive that does not
+# exist yet. --local-repository only changes where the action *definition*
+# resolves from, not what actions/setup fetches at runtime.
+if [ -z "$JOB" ] || [ "$JOB" = "deploy-gate" ]; then
+  echo "NOTE: deploy-gate cannot run under act until devsecops-attestation" >&2
+  echo "v0.4.0 is released (actions/setup would 404 downloading the release" >&2
+  echo "archive). To exercise it locally anyway, temporarily change its" >&2
+  echo "actions/setup step to 'version: source' in the workflow (requires Go" >&2
+  echo "on the runner's PATH) and revert that change before committing." >&2
 fi
 
 if [ -n "$JOB" ]; then

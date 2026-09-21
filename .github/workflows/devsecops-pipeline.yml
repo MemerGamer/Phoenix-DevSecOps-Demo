@@ -62,7 +62,6 @@ jobs:
         run: mix test
         env:
           MIX_ENV: test
-          DATABASE_URL: ecto://postgres:postgres@localhost/demo_test
 
   # ─────────────────────────────────────────────────────────────────
   # 2. SAST - Sobelow (Elixir/Phoenix security scanner)
@@ -120,16 +119,16 @@ jobs:
       - name: Run Sobelow
         run: |
           mkdir -p results
-          # --private skips the update-check banner, which would
-          # otherwise be interleaved with the JSON on stdout. --exit
-          # defaults to false, so a clean scan already exits 0; the
-          # `|| true` only tolerates a scan-time crash so the
-          # file-exists check below fails with a clear message instead
-          # of an opaque step failure. Sobelow has no --out/file-output
-          # flag (verified against the Mix.Tasks.Sobelow docs), so the
-          # report must still go through stdout redirection; the
-          # compile step above is what keeps that stream clean.
-          mix sobelow --format json --private > results/sobelow.json || true
+          # --private skips the update-check banner. --exit defaults to
+          # false, so a clean scan already exits 0; the `|| true` only
+          # tolerates a scan-time crash so the file-exists check below
+          # fails with a clear message instead of an opaque step failure.
+          # Sobelow 0.14.1 (the version pinned in mix.lock) supports
+          # --out to write the report directly to a file, so the JSON
+          # never touches stdout in the first place; the compile step
+          # above still guards against any other tool printing to
+          # stdout/stderr in a way that could interfere with this step.
+          mix sobelow --format json --private --out results/sobelow.json || true
           if [ ! -s results/sobelow.json ]; then
             echo "sobelow produced no output" >&2
             exit 1
@@ -299,6 +298,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
     environment: production
+    # Dependabot-triggered runs do not get repository secrets (GitHub
+    # withholds them from the dependabot actor for security), so every
+    # signing-key input below would be empty and this job would abort on
+    # every dependabot PR. Since the job also targets the production
+    # environment, an empty run would additionally sit waiting on required
+    # reviewers instead of failing fast. Skip the job entirely for
+    # dependabot; the scanner jobs above still run and still report
+    # findings on the PR.
+    if: github.actor != 'dependabot[bot]'
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

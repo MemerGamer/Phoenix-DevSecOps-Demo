@@ -195,6 +195,19 @@ The `deploy-gate` job targets the `production` environment:
 
 **Settings -> Environments -> production -> Required reviewers**
 
+### 5. Dependabot PRs skip deploy-gate
+
+GitHub withholds repository secrets from workflow runs triggered by
+Dependabot, so every `SAST_SIGNING_KEY`-style input on a Dependabot PR would
+be empty and the job would abort. The `deploy-gate` job also targets the
+`production` environment (see above); if left running, an empty
+Dependabot-triggered attempt would sit waiting on required reviewers instead
+of failing fast. `deploy-gate` therefore has
+`if: github.actor != 'dependabot[bot]'` and simply does not run on Dependabot
+PRs. The four scanner jobs (SAST, SCA, config scan, secret scan) are
+unaffected and still run and report findings on every PR, including
+Dependabot's.
+
 ---
 
 ## Local development
@@ -219,23 +232,43 @@ mix precommit
 ### Local pipeline simulation (act)
 
 ```bash
-# Runs the full pipeline locally via act (generates test keys automatically).
-# Looks for a devsecops-attestation checkout at ../devsecops-attestation by
-# default; override with ATTESTATION_SRC=/path/to/devsecops-attestation.
+# Runs the full pipeline locally via act. Looks for a devsecops-attestation
+# checkout at ../devsecops-attestation by default; override with
+# ATTESTATION_SRC=/path/to/devsecops-attestation.
+#
+# Generates a minimal push.json event payload (gitignored) automatically if
+# missing. If .secrets (also gitignored) is missing, the script fails with
+# a clear message by default, since that usually means secrets were never
+# set up rather than that they are intentionally not needed; set
+# ALLOW_NO_SECRETS=1 to opt in, which generates per-check-type test signing
+# keys into .secrets automatically.
 bash scripts/act-debug.sh
 
 # Run a specific job
 bash scripts/act-debug.sh deploy-gate
 ```
 
-The composite actions in `deploy-gate` download release binaries from
-`MemerGamer/devsecops-attestation`'s GitHub Releases; until a release is
-published, a plain `act` run of that job has nothing to download. Recent
-versions of `act` support pointing `uses:` refs at a local checkout instead
-(`act --help` shows whether `--local-repository` is available); `scripts/act-debug.sh`
-detects this and adds the flag automatically. Otherwise, use
+**`deploy-gate` cannot run under act until a devsecops-attestation `v0.4.0`
+GitHub release actually exists.** Its `actions/setup` step downloads a
+release archive from `MemerGamer/devsecops-attestation`'s GitHub Releases;
+with no `v0.4.0` release published, that download 404s. This is not fixable
+with act's `--local-repository` flag: that flag only changes where the
+*action definition* (`action.yml`) is resolved from, not what
+`actions/setup` downloads at runtime (a plain `curl` against
+`download-base-url` / the release tag). The only way to exercise
+`deploy-gate` locally today is to temporarily edit the workflow so its
+`actions/setup` step uses `version: source` instead of `version: 0.4.0`
+(see `actions/setup/action.yml` in devsecops-attestation), which builds the
+CLI binaries from a local checkout with `go build` instead of downloading a
+release archive. That requires Go on the runner's `PATH`, and the workflow
+edit should be reverted before committing. Otherwise, use
 devsecops-attestation's own `actions/test/run-local.sh` to exercise the
-composite actions' scripts directly against a local build.
+composite actions' scripts directly against a local build. Once `v0.4.0` is
+released, the pinned `@v0.4.0` steps will resolve normally under act with no
+special handling.
+
+`scripts/act-debug.sh` also prints this warning at runtime when running the
+full pipeline or the `deploy-gate` job specifically.
 
 ---
 
