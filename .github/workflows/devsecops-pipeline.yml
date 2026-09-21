@@ -46,14 +46,14 @@ jobs:
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - name: Cache build
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: _build
           key: ${{ runner.os }}-build-${{ hashFiles('**/mix.lock') }}
@@ -97,7 +97,7 @@ jobs:
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
@@ -106,7 +106,7 @@ jobs:
       # compile step below overrides it) so this cache never collides
       # with the build job's dev/test _build cache.
       - name: Cache build
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: _build
           key: ${{ runner.os }}-build-dev-${{ hashFiles('**/mix.lock') }}
@@ -172,7 +172,7 @@ jobs:
           otp-version: "28"
 
       - name: Cache deps
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
@@ -181,7 +181,7 @@ jobs:
       # compile step below overrides it) so this cache never collides
       # with the build job's dev/test _build cache.
       - name: Cache build
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: _build
           key: ${{ runner.os }}-build-dev-${{ hashFiles('**/mix.lock') }}
