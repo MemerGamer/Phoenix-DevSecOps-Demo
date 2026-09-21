@@ -79,14 +79,31 @@ every run. This demo intentionally ships hardcoded `secret_key_base` literals
 in `config/dev.exs` and `config/test.exs` (see git history: "fix: block
 deployment on any hardcoded credential finding"). Gitleaks findings are
 always normalized to `critical` severity, and the policy compiled into the
-`gate` binary treats the `secret` check type as zero-tolerance (any finding,
-any severity, blocks deployment) as well as blocking any critical finding
-outright. So the secret-scan attestation alone is enough to deny the gate,
-regardless of what SAST, SCA, or config-scan find. `expect: deny` makes this
-the pipeline's intended, non-flaky outcome: the job fails only if the gate
-unexpectedly *allows*, or if gate evaluation itself errors (bad signer, hash
-mismatch, missing log entry, malformed chain) rather than reaching a policy
-decision at all.
+`gate` binary (v0.4.0 defaults: `fail_on_severity: high`, `zero_tolerance_checks:
+secret`, `required_checks: sast, sca, config, secret`) treats the `secret`
+check type as zero-tolerance (any finding, any severity, blocks deployment)
+as well as blocking any high-or-above severity finding outright. So the
+secret-scan attestation alone is enough to deny the gate, regardless of what
+SAST, SCA, or config-scan find.
+
+Re-simulating the released v0.4.0 action scripts (`normalize-sign` x4 then
+`gate`) against this pipeline's raw scan artifacts against the bundled
+policy's defaults currently produces a deny with these reason types:
+
+- **failed checks** -- one or more check types (in the observed run: sast,
+  sca, secret) report an attestation whose `result.passed` is `false`.
+- **findings at or above the blocking severity threshold** (`high` by
+  default) -- Sobelow and mix_audit findings that clear the threshold.
+- **hardcoded credential findings** -- Gitleaks findings on the
+  zero-tolerance `secret` check type (the `secret_key_base` literals above).
+
+Exact counts are not reproduced here since they shift with dependency and
+scanner-database updates; the reason types above are what `expect: deny`
+checks for staying stable. `expect: deny` makes this the pipeline's
+intended, non-flaky outcome: the job fails only if the gate unexpectedly
+*allows*, or if gate evaluation itself errors (bad signer, hash mismatch,
+missing log entry, malformed chain) rather than reaching a policy decision
+at all.
 
 If the hardcoded secrets are ever removed from the demo (making it an
 "allow" demo instead), flip `expect: deny` to `expect: allow` in
@@ -383,51 +400,28 @@ bash scripts/act-debug.sh
 bash scripts/act-debug.sh deploy-gate
 ```
 
-**`deploy-gate` needs two separate things fixed to run under act before a
-devsecops-attestation `v0.4.0` GitHub release exists**, and they are not the
-same problem:
+`devsecops-attestation` `v0.4.0` is released, so act (like GitHub Actions)
+resolves `uses: MemerGamer/devsecops-attestation/actions/...@ed0b603...`
+(the pinned release commit SHA) directly against the real repository, and
+`actions/setup`'s `version: 0.4.0` input downloads the real release archive.
+No workaround is required to run `deploy-gate` under act.
 
-1. **Resolving the action references at all.** CI run 35591276722 failed
-   with `Unable to resolve action ... unable to find version v0.4.0` --
-   act (like GitHub Actions) cannot resolve
-   `uses: MemerGamer/devsecops-attestation/actions/...@v0.4.0` against a
-   `v0.4.0` git ref that does not exist upstream yet, before any step even
-   runs. `scripts/act-debug.sh` fixes this by passing:
+`scripts/act-debug.sh` still passes `--local-repository` unconditionally:
 
-   ```
-   --local-repository "MemerGamer/devsecops-attestation@v0.4.0=$ATTESTATION_SRC"
-   ```
+```
+--local-repository "MemerGamer/devsecops-attestation@ed0b603...=$ATTESTATION_SRC"
+```
 
-   (syntax per `act --help`: `owner/repo@ref=/local/path`, matching that ref
-   on any host/protocol), which redirects that ref to a local checkout
-   instead of trying to fetch it.
-
-2. **`actions/setup` downloading a release archive that does not exist.**
-   Once action resolution succeeds, `actions/setup`'s own `setup.sh` still
-   runs with the pinned `version: 0.4.0` input, which does a plain `curl`
-   for a release archive from GitHub Releases / `download-base-url` -- and
-   that still 404s, `--local-repository` or not, since `--local-repository`
-   only changes where the *action definition* (`action.yml`) resolves from,
-   not what the action's own script downloads at runtime. To exercise
-   `deploy-gate` locally anyway, temporarily change its `actions/setup`
-   step's `version` input from `0.4.0` to `source` in the workflow (see
-   `actions/setup/action.yml` in devsecops-attestation): that makes
-   `setup.sh` build the CLI binaries from the now-locally-resolved checkout
-   with `go build` instead of downloading an archive. This requires a Go
-   toolchain on `PATH` **inside the act job's runner image** -- the default
-   `catthehacker/ubuntu` images do not ship Go, so either use an image that
-   does or add an equivalent install step ahead of it, for local testing
-   only. Revert the `version: source` edit before committing.
+(syntax per `act --help`: `owner/repo@ref=/local/path`, matching that ref on
+any host/protocol). This redirects the pinned ref to `$ATTESTATION_SRC`
+instead of fetching it from GitHub, which is only needed to test unreleased
+changes to the composite actions themselves (e.g. editing
+`actions/gate/gate.sh` locally before cutting a new release) -- for anything
+else it is a no-op, since the local checkout at that commit and the released
+ref are identical.
 
 Otherwise, use devsecops-attestation's own `actions/test/run-local.sh` to
 exercise the composite actions' scripts directly against a local build.
-Once `v0.4.0` is released, the pinned `@v0.4.0` steps resolve normally both
-under act (via `--local-repository`, or without it once the tag exists) and
-on real GitHub Actions runners, and neither workaround is needed.
-
-`scripts/act-debug.sh` also prints a runtime reminder of point 2 above when
-running the full pipeline or the `deploy-gate` job specifically (point 1 is
-handled unconditionally by the `--local-repository` flag it always passes).
 
 ---
 

@@ -3,45 +3,29 @@
 # Run from the repo root: bash scripts/act-debug.sh [job]
 # If no job is given, runs all jobs in order.
 #
-# IMPORTANT: what actually breaks deploy-gate under act, and what fixes it.
+# devsecops-attestation v0.4.0 is released, so act (like GitHub Actions)
+# resolves the pinned `uses: MemerGamer/devsecops-attestation/actions/...@
+# <release commit SHA>` steps directly against the real repository, and
+# actions/setup's `version: 0.4.0` input downloads the real release archive.
+# No workaround is needed to run deploy-gate under act.
 #
-# CI run 35591276722 was a real GitHub Actions run, and it failed with
-# "Unable to resolve action ... unable to find version v0.4.0" -- GitHub
-# Actions (and act, identically) fail to resolve the
-# `uses: MemerGamer/devsecops-attestation/actions/...@v0.4.0` action
-# *reference itself* (there is no v0.4.0 tag in that repository yet), before
-# actions/setup.sh ever runs. That is exactly what act's --local-repository
-# flag is for: it redirects a given "owner/repo@ref" (or full URL@ref) to a
-# local folder instead of trying to fetch that ref, so action resolution
-# succeeds against a local devsecops-attestation checkout regardless of
-# whether v0.4.0 has been tagged upstream. This script passes it below,
-# pointed at $ATTESTATION_SRC.
-#
-# --local-repository only fixes *resolving the action*, though. Once
-# resolved, actions/setup's own setup.sh still runs, and with
-# `version: 0.4.0` (as pinned in the workflow) it does a plain `curl` for a
-# release archive from GitHub Releases / download-base-url -- which still
-# 404s with no v0.4.0 release actually published, --local-repository or not.
-# So deploy-gate additionally needs its actions/setup step's `version` input
-# changed from `0.4.0` to `source` to exercise it locally: that makes
-# setup.sh build the CLI binaries from the (now locally-resolved) checkout
-# with `go build` instead of downloading a release archive, which requires a
-# Go toolchain on PATH *inside the act job's runner image* (the default
-# catthehacker/ubuntu images do not ship Go; either use an image that does,
-# or add a `setup-go`-equivalent step ahead of it for local testing only).
-# That workflow edit is for local debugging only -- do not commit it. Once
-# v0.4.0 is released, the pinned `@v0.4.0` steps resolve normally both under
-# act (via --local-repository, or without it once the tag exists) and on
-# real GitHub Actions runners.
+# This script still passes act's --local-repository flag unconditionally
+# (pointed at $ATTESTATION_SRC): it redirects the pinned "owner/repo@ref" to
+# a local checkout instead of fetching it from GitHub, which only matters
+# when testing unreleased changes to the composite actions themselves (e.g.
+# editing actions/gate/gate.sh locally before cutting a new release). For
+# anything else it is a no-op, since the local checkout at that commit and
+# the released ref are identical.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Path to a local devsecops-attestation checkout. Used both to build the
 # keygen binary for local test key generation below, and as the
-# --local-repository target so act can resolve the
-# MemerGamer/devsecops-attestation/actions/...@v0.4.0 steps without that tag
-# existing upstream (see the header comment). Override with the
-# ATTESTATION_SRC environment variable if your checkout lives elsewhere.
+# --local-repository target so act can resolve the pinned
+# MemerGamer/devsecops-attestation/actions/...@<release commit SHA> steps
+# against a local checkout instead of GitHub, for testing unreleased action
+# changes (see the header comment). Override with the ATTESTATION_SRC
+# environment variable if your checkout lives elsewhere.
 ATTESTATION_SRC="${ATTESTATION_SRC:-$REPO_DIR/../devsecops-attestation}"
 
 # Per-user cache directory, never a fixed shared /tmp path: a world-writable
@@ -160,29 +144,14 @@ ACT_CMD=(
   -e "$PUSH_EVENT_FILE"
   --secret-file "$SECRETS_FILE"
   --artifact-server-path "$ARTIFACTS_DIR"
-  # Resolves the MemerGamer/devsecops-attestation/actions/...@v0.4.0 steps
-  # against the local checkout instead of a v0.4.0 git ref that does not
-  # exist upstream yet (see the header comment). Syntax per `act --help`:
-  # "owner/repo@ref=/local/path" matches that ref on any host/protocol.
-  --local-repository "MemerGamer/devsecops-attestation@v0.4.0=$ATTESTATION_SRC"
+  # Redirects the pinned MemerGamer/devsecops-attestation/actions/...@<release
+  # commit SHA> steps to the local checkout instead of fetching them from
+  # GitHub (see the header comment). Syntax per `act --help`:
+  # "owner/repo@ref=/local/path" matches that ref on any host/protocol. A
+  # no-op when the local checkout matches the released ref; only needed to
+  # test unreleased changes to the composite actions themselves.
+  --local-repository "MemerGamer/devsecops-attestation@ed0b603a70a0146264aa91eecfd17d95eccf9d38=$ATTESTATION_SRC"
 )
-
-# See the header comment: --local-repository above lets act resolve the
-# deploy-gate action references at all, but actions/setup's `version: 0.4.0`
-# input still downloads a release archive that does not exist yet, so the
-# job still fails at that step unless it is temporarily changed to
-# `version: source` (requires Go on the act runner image's PATH). That
-# workflow edit is for local debugging only; do not commit it.
-if [ -z "$JOB" ] || [ "$JOB" = "deploy-gate" ]; then
-  echo "NOTE: --local-repository lets act resolve the deploy-gate action" >&2
-  echo "references, but actions/setup's 'version: 0.4.0' input still" >&2
-  echo "downloads a release archive that does not exist until v0.4.0 is" >&2
-  echo "published. To exercise deploy-gate locally anyway, temporarily" >&2
-  echo "change that step's 'version' input to 'source' in the workflow" >&2
-  echo "(requires Go on the act runner image's PATH -- the default" >&2
-  echo "catthehacker/ubuntu images do not ship Go) and revert the edit" >&2
-  echo "before committing." >&2
-fi
 
 if [ -n "$JOB" ]; then
   ACT_CMD+=(-j "$JOB")
