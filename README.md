@@ -6,7 +6,8 @@ A demo [Phoenix](https://www.phoenixframework.org/) application wired into the
 [devsecops-attestation](https://github.com/MemerGamer/devsecops-attestation)
 cryptographic pipeline.
 
-Every push runs four security checks, then reuses devsecops-attestation's
+Every push and pull request runs four security checks, then reuses
+devsecops-attestation's
 [composite actions](https://github.com/MemerGamer/devsecops-attestation/tree/main/actions)
 to normalize and sign each raw result into an Ed25519-linked attestation
 chain, and to run a `deploy-gate` job that evaluates the chain against
@@ -217,6 +218,16 @@ The `deploy-gate` job targets the `production` environment:
 
 **Settings -> Environments -> production -> Required reviewers**
 
+Trade-off: `deploy-gate`'s `if:` condition (below) still lets same-repository
+PR runs and pushes to any branch other than `main` (e.g. `develop`) enter a
+job with `environment: production`. If a deployment branch policy and/or
+required reviewers are added on `production`, those same-repo PR and
+non-`main` push runs would then fail (branch policy) or sit waiting for
+approval (required reviewers) instead of completing, which would make PR CI
+red. To keep PR CI green while still gating real deploys, either narrow the
+`if:` to `github.ref == 'refs/heads/main'` or point non-`main` runs at a
+separate, non-production environment.
+
 ### 5. Dependabot and fork PRs skip deploy-gate
 
 GitHub withholds repository secrets from workflow runs triggered by
@@ -239,7 +250,7 @@ and simply does not run on Dependabot PRs or fork PRs. The four scanner jobs
 report findings on every PR, including Dependabot's and forks'. To exercise
 a Dependabot version bump against `deploy-gate` anyway (e.g. to confirm a
 bumped dependency doesn't change the expected gate decision), configure
-[Dependabot secrets](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#allow)
+[Dependabot secrets](https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions#accessing-secrets)
 (**Settings -> Secrets and variables -> Dependabot**) with the same eight
 signing/public key secrets as the repository secrets above; Dependabot-
 triggered runs receive those instead of repository secrets, and the `if:`
@@ -293,6 +304,14 @@ the repository owner should make deliberately):
    closes the same-repository-branch exposure above: only a workflow run
    deploying from `main` could read them. Optionally add required reviewers
    on the same environment for a human gate before the keys are even used.
+   Trade-off: as written, `deploy-gate` also runs for same-repository PRs
+   and pushes to non-`main` branches (see "4. (Optional) Require manual
+   approval before deploy" above), and those runs would then fail against a
+   main-only deployment branch policy, or wait indefinitely on required
+   reviewers, instead of completing. Narrow the job's `if:` to
+   `github.ref == 'refs/heads/main'`, or run non-`main` traffic against a
+   separate non-production environment, to keep PR CI green under either
+   restriction.
 2. Public keys (`*_PUBLIC_KEY`) can stay as either secrets or
    [repository/environment variables](https://docs.github.com/en/actions/learn-github-actions/variables):
    they are not sensitive (verification only), and using `vars.*` instead of
@@ -308,14 +327,14 @@ the repository owner should make deliberately):
 `deploy-gate` installs [`sigstore/cosign-installer`](https://github.com/sigstore/cosign-installer)
 (pinned by full commit SHA) before `actions/setup`, and passes
 `verify-signature: "true"` to `actions/setup`. This makes `actions/setup`
-verify the downloaded `checksums.txt` against its cosign sign-blob signature
-and certificate -- checking that the release was actually built and signed
-by devsecops-attestation's own GitHub Actions workflow (via Sigstore's
-keyless OIDC identity binding) -- before any checksum in it is trusted to
-verify the release archive. Without this, checksum verification alone only
-proves the downloaded archive matches its accompanying `checksums.txt`; it
-says nothing about whether that file was ever published by the real
-project.
+verify the downloaded `checksums.txt` against its Sigstore bundle
+(`checksums.txt.sigstore.json`) -- checking that the release was actually
+built and signed by devsecops-attestation's own GitHub Actions workflow
+(via Sigstore's keyless OIDC identity binding) -- before any checksum in it
+is trusted to verify the release archive. Without this, checksum
+verification alone only proves the downloaded archive matches its
+accompanying `checksums.txt`; it says nothing about whether that file was
+ever published by the real project.
 
 ---
 
@@ -339,6 +358,13 @@ mix precommit
 ```
 
 ### Local pipeline simulation (act)
+
+Prerequisites:
+
+- [`act`](https://github.com/nektos/act)
+- Docker, running and reachable by `act`
+- A Go toolchain on the host: `scripts/act-debug.sh` always builds
+  `keygen` locally from a devsecops-attestation checkout
 
 ```bash
 # Runs the full pipeline locally via act. Looks for a devsecops-attestation

@@ -5,8 +5,9 @@
 #
 # IMPORTANT: what actually breaks deploy-gate under act, and what fixes it.
 #
-# CI run 35591276722 failed with "Unable to resolve action
-# ... unable to find version v0.4.0" -- that is act failing to resolve the
+# CI run 35591276722 was a real GitHub Actions run, and it failed with
+# "Unable to resolve action ... unable to find version v0.4.0" -- GitHub
+# Actions (and act, identically) fail to resolve the
 # `uses: MemerGamer/devsecops-attestation/actions/...@v0.4.0` action
 # *reference itself* (there is no v0.4.0 tag in that repository yet), before
 # actions/setup.sh ever runs. That is exactly what act's --local-repository

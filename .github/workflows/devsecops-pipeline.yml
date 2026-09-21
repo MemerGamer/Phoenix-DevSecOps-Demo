@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        # Pinned to the postgres:16.15 digest (linux/amd64), resolved via
+        # Pinned to the postgres:16.15 multi-arch index digest, resolved via
         # `docker pull postgres:16.15 && docker inspect --format
         # '{{index .RepoDigests 0}}' postgres:16.15`. postgres:16 and
         # postgres:16.15 resolved to the same digest at pin time.
@@ -379,8 +379,8 @@ jobs:
           path: raw/secret
 
       # Installs cosign so actions/setup's verify-signature: "true" below can
-      # check the downloaded release checksums.txt against its cosign
-      # sign-blob signature and certificate before anything in this job
+      # check the downloaded release checksums.txt against its Sigstore
+      # bundle (checksums.txt.sigstore.json) before anything in this job
       # trusts it. Pinned to sigstore/cosign-installer v4.1.2 by full commit
       # SHA, resolved via `git ls-remote --tags
       # https://github.com/sigstore/cosign-installer.git`.
