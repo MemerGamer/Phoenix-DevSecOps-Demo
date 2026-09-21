@@ -6,10 +6,16 @@ A demo [Phoenix](https://www.phoenixframework.org/) application wired into the
 [devsecops-attestation](https://github.com/MemerGamer/devsecops-attestation)
 cryptographic pipeline.
 
-Every push runs four security checks, signs each result into an Ed25519-linked
-attestation chain, then evaluates a deploy gate via OPA/Rego policy. Deployment
-only proceeds if every signature verifies against the authorized per-check-type
-key and the policy allows it.
+Every push runs four security checks, then reuses devsecops-attestation's
+[composite actions](https://github.com/MemerGamer/devsecops-attestation/tree/main/actions)
+to normalize and sign each raw result into an Ed25519-linked attestation
+chain, and to evaluate a deploy gate against the project's bundled OPA/Rego
+policy. This repository no longer clones or builds the attestation CLI from
+source, and no longer carries its own copy of the policy: `actions/setup`
+downloads the released binaries and the canonical `deploy.rego`, so there is
+exactly one policy to audit, upstream. Deployment only proceeds if every
+signature verifies against the authorized per-check-type key and the policy
+allows it.
 
 ---
 
@@ -22,16 +28,17 @@ flowchart TD
     B --> D["SCA\nmix_audit"]
     B --> E["Config Scan\nCheckov"]
     B --> F["Secret Scan\nGitleaks"]
-    C --> G[results/sast.json]
-    D --> H[results/sca.json]
-    E --> I[results/config.json]
-    F --> J[results/secret.json]
-    G & H & I & J --> K[Deploy Gate]
-    K --> L["Sign SAST · Sign SCA · Sign Config · Sign Secret\nchain.json  ·  Ed25519 per-check-type keys"]
-    L --> M["gate evaluate\nchain.json + .github/policies/deploy.rego"]
+    C --> G[sobelow.json]
+    D --> H[mix-audit.json]
+    E --> I[checkov.json]
+    F --> J[gitleaks.json]
+    G & H & I & J --> K[Deploy Gate job]
+    K --> K1["actions/setup\ndownload attest/verify/gate + bundled deploy.rego"]
+    K1 --> L["actions/normalize-sign x4\nattestation-chain.json · Ed25519 per-check-type keys"]
+    L --> M["actions/gate\nverify + gate evaluate against the bundled policy"]
     M --> N{Decision}
     N -->|allow| O[Deploy]
-    N -->|block| P[Pipeline Fails]
+    N -->|deny| P[Pipeline Fails]
 ```
 
 ## Attestation chain
@@ -48,6 +55,26 @@ Each check type uses a dedicated key pair. A compromised SAST key cannot forge
 SCA, config, or secret attestations. Any insertion, deletion, or reordering of
 attestations breaks the SHA-256 chain linkage and causes `gate evaluate` to
 reject the deployment.
+
+## Expected gate outcome
+
+The `deploy-gate` job runs with `expect: deny`, and is expected to deny on
+every run. This demo intentionally ships hardcoded `secret_key_base` literals
+in `config/dev.exs` and `config/test.exs` (see git history: "fix: block
+deployment on any hardcoded credential finding"). Gitleaks findings are
+always normalized to `critical` severity, and the bundled `deploy.rego`
+policy treats the `secret` check type as zero-tolerance (any finding, any
+severity, blocks deployment) as well as blocking any critical finding
+outright. So the secret-scan attestation alone is enough to deny the gate,
+regardless of what SAST, SCA, or config-scan find. `expect: deny` makes this
+the pipeline's intended, non-flaky outcome: the job fails only if the gate
+unexpectedly *allows*, or if gate evaluation itself errors (bad signer, hash
+mismatch, missing log entry, malformed chain) rather than reaching a policy
+decision at all.
+
+If the hardcoded secrets are ever removed from the demo (making it an
+"allow" demo instead), flip `expect: deny` to `expect: allow` in
+`.github/workflows/devsecops-pipeline.yml`.
 
 ---
 
@@ -67,8 +94,7 @@ reject the deployment.
 ```
 Phoenix-DevSecOps-Demo/
 ├── .github/
-│   ├── policies/
-│   │   └── deploy.rego              # OPA/Rego deployment policy
+│   ├── dependabot.yml                # github-actions, mix, docker updates
 │   └── workflows/
 │       └── devsecops-pipeline.yml   # GitHub Actions CI/CD workflow
 ├── assets/                          # JS / CSS (esbuild + Tailwind)
@@ -154,16 +180,14 @@ done
 
 > **Never commit any `private.hex` file.** The `keys/` directory is gitignored in the attestation repo.
 
-### 3. Policy hash (keep in sync)
+### 3. Policy
 
-The gate step pins the SHA-256 of `deploy.rego` via `--policy-hash`. If you update
-the policy, recompute the hash and update the workflow:
-
-```bash
-sha256sum .github/policies/deploy.rego
-```
-
-Then update `--policy-hash` in `.github/workflows/devsecops-pipeline.yml`.
+The `deploy-gate` job's `actions/gate` step passes no `policy` or
+`policy-hash` input, so it evaluates against the bundled canonical
+`deploy.rego` that `actions/setup` downloads and installs alongside the CLI
+binaries (from `policies/deploy.rego` in devsecops-attestation). There is no
+local copy of the policy to keep in sync in this repository; the policy
+lives and is versioned upstream, one file for every consumer.
 
 ### 4. (Optional) Require manual approval before deploy
 
@@ -195,12 +219,43 @@ mix precommit
 ### Local pipeline simulation (act)
 
 ```bash
-# Runs the full pipeline locally via act (generates test keys automatically)
+# Runs the full pipeline locally via act (generates test keys automatically).
+# Looks for a devsecops-attestation checkout at ../devsecops-attestation by
+# default; override with ATTESTATION_SRC=/path/to/devsecops-attestation.
 bash scripts/act-debug.sh
 
 # Run a specific job
 bash scripts/act-debug.sh deploy-gate
 ```
+
+The composite actions in `deploy-gate` download release binaries from
+`MemerGamer/devsecops-attestation`'s GitHub Releases; until a release is
+published, a plain `act` run of that job has nothing to download. Recent
+versions of `act` support pointing `uses:` refs at a local checkout instead
+(`act --help` shows whether `--local-repository` is available); `scripts/act-debug.sh`
+detects this and adds the flag automatically. Otherwise, use
+devsecops-attestation's own `actions/test/run-local.sh` to exercise the
+composite actions' scripts directly against a local build.
+
+---
+
+## Forgejo
+
+The devsecops-attestation composite actions are plain bash (`shell: bash`),
+so they run unmodified on Forgejo Actions runners. On Forgejo, reference them
+by full URL instead of the GitHub `owner/repo` shorthand:
+
+```yaml
+- uses: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/actions/setup@v0.4.0
+  with:
+    version: 0.4.0
+    download-base-url: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/releases/download
+```
+
+`download-base-url` must be set explicitly on Forgejo: the action's own
+default points at the GitHub release. Everything else (signer identity, log
+entry URLs, `GITHUB_*`/`RUNNER_*` variables) works unchanged, since Forgejo
+Actions exports the same variables the composite actions rely on.
 
 ## License
 
