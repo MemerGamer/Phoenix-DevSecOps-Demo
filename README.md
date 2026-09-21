@@ -9,13 +9,18 @@ cryptographic pipeline.
 Every push runs four security checks, then reuses devsecops-attestation's
 [composite actions](https://github.com/MemerGamer/devsecops-attestation/tree/main/actions)
 to normalize and sign each raw result into an Ed25519-linked attestation
-chain, and to evaluate a deploy gate against the project's bundled OPA/Rego
-policy. This repository no longer clones or builds the attestation CLI from
-source, and no longer carries its own copy of the policy: `actions/setup`
-downloads the released binaries and the canonical `deploy.rego`, so there is
-exactly one policy to audit, upstream. Deployment only proceeds if every
-signature verifies against the authorized per-check-type key and the policy
-allows it.
+chain, and to run a `deploy-gate` job that evaluates the chain against
+devsecops-attestation's canonical OPA/Rego policy. This repository no longer
+clones or builds the attestation CLI from source, and no longer carries its
+own copy of the policy: `actions/setup` downloads the released binaries and
+a copy of `deploy.rego`, so there is exactly one policy to audit, upstream.
+The `gate` binary evaluates against the policy compiled into it, not the
+downloaded copy (see "Policy" below), so there is also exactly one place
+that policy is compiled into. There is no deploy step in this pipeline:
+`deploy-gate` is the gate a real deploy step would sit behind, and reaching
+the expected decision -- every signature verifying against the authorized
+per-check-type key, and the policy either allowing or denying as expected --
+is as far as this demo goes.
 
 ---
 
@@ -33,13 +38,20 @@ flowchart TD
     E --> I[checkov.json]
     F --> J[gitleaks.json]
     G & H & I & J --> K[Deploy Gate job]
-    K --> K1["actions/setup\ndownload attest/verify/gate + bundled deploy.rego"]
+    K --> K0["cosign-installer\npinned, before setup"]
+    K0 --> K1["actions/setup\ndownload attest/verify/gate + deploy.rego copy\nverify-signature: true"]
     K1 --> L["actions/normalize-sign x4\nattestation-chain.json · Ed25519 per-check-type keys"]
-    L --> M["actions/gate\nverify + gate evaluate against the bundled policy"]
+    L --> M["actions/gate\nverify + gate evaluate against the policy\ncompiled into the gate binary"]
     M --> N{Decision}
-    N -->|allow| O[Deploy]
-    N -->|deny| P[Pipeline Fails]
+    N -->|deny, expected| O[Gate job passes\nthis demo's actual outcome]
+    N -->|allow, unexpected| P[Gate job fails\nno deploy step exists either way]
 ```
+
+There is no deploy step anywhere in this pipeline. `deploy-gate` is a
+stand-in for the check a real deploy step would sit behind: `deny` is this
+demo's expected, intended outcome (see "Expected gate outcome" below) and
+makes the gate job pass under `expect: deny`; an unexpected `allow` or any
+evaluation error fails it instead.
 
 ## Attestation chain
 
@@ -52,9 +64,12 @@ flowchart LR
 ```
 
 Each check type uses a dedicated key pair. A compromised SAST key cannot forge
-SCA, config, or secret attestations. Any insertion, deletion, or reordering of
-attestations breaks the SHA-256 chain linkage and causes `gate evaluate` to
-reject the deployment.
+a signature that verifies as an SCA, config, or secret attestation -- that is
+a cryptographic guarantee about what each key can *sign*, not a statement
+about where the keys are stored or who can read them operationally; see
+"Trust boundaries and recommended repository settings" below for that. Any
+insertion, deletion, or reordering of attestations breaks the SHA-256 chain
+linkage and causes `gate evaluate` to reject the run.
 
 ## Expected gate outcome
 
@@ -62,9 +77,9 @@ The `deploy-gate` job runs with `expect: deny`, and is expected to deny on
 every run. This demo intentionally ships hardcoded `secret_key_base` literals
 in `config/dev.exs` and `config/test.exs` (see git history: "fix: block
 deployment on any hardcoded credential finding"). Gitleaks findings are
-always normalized to `critical` severity, and the bundled `deploy.rego`
-policy treats the `secret` check type as zero-tolerance (any finding, any
-severity, blocks deployment) as well as blocking any critical finding
+always normalized to `critical` severity, and the policy compiled into the
+`gate` binary treats the `secret` check type as zero-tolerance (any finding,
+any severity, blocks deployment) as well as blocking any critical finding
 outright. So the secret-scan attestation alone is enough to deny the gate,
 regardless of what SAST, SCA, or config-scan find. `expect: deny` makes this
 the pipeline's intended, non-flaky outcome: the job fails only if the gate
@@ -118,7 +133,8 @@ Phoenix-DevSecOps-Demo/
 
 ### 1. Prerequisites
 
-- Elixir >= 1.15 / Erlang OTP >= 26
+- Elixir ~> 1.19 / Erlang OTP 28 (matching `mix.exs`'s `elixir: "~> 1.19"`
+  and the CI workflow's `erlef/setup-beam` versions)
 - PostgreSQL 14+ running locally (user `postgres`, password `postgres`)
   ```bash
   # Arch / CachyOS
@@ -183,11 +199,17 @@ done
 ### 3. Policy
 
 The `deploy-gate` job's `actions/gate` step passes no `policy` or
-`policy-hash` input, so it evaluates against the bundled canonical
-`deploy.rego` that `actions/setup` downloads and installs alongside the CLI
-binaries (from `policies/deploy.rego` in devsecops-attestation). There is no
-local copy of the policy to keep in sync in this repository; the policy
-lives and is versioned upstream, one file for every consumer.
+`policy-hash` input. Without `--policy`, `gate evaluate` uses the canonical
+`deploy.rego` policy compiled into the `gate` binary itself at build time
+(`policy.DefaultPolicy`, embedded from `policies/deploy.rego` in
+devsecops-attestation) -- **not** the separate copy of `deploy.rego` that
+`actions/setup` also downloads and installs alongside the CLI binaries. That
+downloaded copy exists for inspection, or for a caller that wants to pin it
+explicitly via `--policy` / `--policy-hash`; this workflow does neither, so
+it plays no role in what actually evaluates. Either way there is no local
+copy of the policy to keep in sync in this repository: the policy lives and
+is versioned upstream, one file compiled into one binary, for every
+consumer.
 
 ### 4. (Optional) Require manual approval before deploy
 
@@ -195,18 +217,105 @@ The `deploy-gate` job targets the `production` environment:
 
 **Settings -> Environments -> production -> Required reviewers**
 
-### 5. Dependabot PRs skip deploy-gate
+### 5. Dependabot and fork PRs skip deploy-gate
 
 GitHub withholds repository secrets from workflow runs triggered by
 Dependabot, so every `SAST_SIGNING_KEY`-style input on a Dependabot PR would
 be empty and the job would abort. The `deploy-gate` job also targets the
 `production` environment (see above); if left running, an empty
 Dependabot-triggered attempt would sit waiting on required reviewers instead
-of failing fast. `deploy-gate` therefore has
-`if: github.actor != 'dependabot[bot]'` and simply does not run on Dependabot
-PRs. The four scanner jobs (SAST, SCA, config scan, secret scan) are
-unaffected and still run and report findings on every PR, including
-Dependabot's.
+of failing fast. The same is true of a PR from a fork: GitHub withholds
+repository secrets from `pull_request` runs whose head repository is not
+this one, for the same reason. `deploy-gate` therefore has:
+
+```yaml
+if: >-
+  github.actor != 'dependabot[bot]' &&
+  (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+```
+
+and simply does not run on Dependabot PRs or fork PRs. The four scanner jobs
+(SAST, SCA, config scan, secret scan) are unaffected and still run and
+report findings on every PR, including Dependabot's and forks'. To exercise
+a Dependabot version bump against `deploy-gate` anyway (e.g. to confirm a
+bumped dependency doesn't change the expected gate decision), configure
+[Dependabot secrets](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#allow)
+(**Settings -> Secrets and variables -> Dependabot**) with the same eight
+signing/public key secrets as the repository secrets above; Dependabot-
+triggered runs receive those instead of repository secrets, and the `if:`
+condition above would then need `dependabot[bot]` removed for such a test.
+
+---
+
+## Trust boundaries and recommended repository settings
+
+The per-check-type key design cryptographically isolates the four
+attestation types from each other: a compromised SAST key cannot produce a
+signature that verifies as an SCA, config, or secret attestation, because
+each check type's public key is checked independently by `gate evaluate
+--authorized-signers`. That claim is true, but narrow -- it says nothing
+about where the *private* keys live operationally, which is a separate,
+broader trust boundary:
+
+- All four `*_SIGNING_KEY` secrets are consumed by the same `deploy-gate`
+  job, in the same workflow run. A workflow run that can read one can read
+  all four; the per-check-type isolation is about what a compromised key can
+  *forge*, not about blast radius if the workflow itself, or its runner, is
+  compromised.
+- As plain **repository secrets**, all eight keys are available to any
+  workflow run in this repository that can reach a job with `secrets.*`
+  access -- including a run triggered from any branch, not just `main`, as
+  long as that branch's workflow file requests the secret. `environment:
+  production` on `deploy-gate` gates *when the job runs* (e.g. required
+  reviewers), but it does not change *repository*-secret visibility the way
+  environment-scoped secrets would; a same-repository branch that edits the
+  workflow to print or exfiltrate `secrets.SAST_SIGNING_KEY` can do so today
+  without needing production environment access, because the secret is a
+  repository secret, not an environment one.
+- Dependabot and fork PRs are excluded from `deploy-gate` (above), which
+  closes the most obvious external route to those secrets, but does not
+  change the same-repository exposure above.
+- Raw scan-result artifacts travel between jobs **unsigned**. The signature
+  only attests to what `deploy-gate` actually downloaded and fed to
+  `normalize-sign`; nothing cryptographically ties a raw artifact back to
+  the job that produced it. Artifact isolation (separate per-check-type
+  download paths, no shared merge) prevents accidental overwrite between
+  check types, but it is not a substitute for the attestation chain's own
+  guarantees, which only start once a result has been signed.
+
+Recommended hardening, not yet applied in this demo (left as configuration
+the repository owner should make deliberately):
+
+1. **Move the four `*_SIGNING_KEY` secrets into `production` environment
+   secrets**, not repository secrets, with a deployment branch policy
+   restricting the `production` environment to `main` only (**Settings ->
+   Environments -> production -> Deployment branches and tags**). This
+   closes the same-repository-branch exposure above: only a workflow run
+   deploying from `main` could read them. Optionally add required reviewers
+   on the same environment for a human gate before the keys are even used.
+2. Public keys (`*_PUBLIC_KEY`) can stay as either secrets or
+   [repository/environment variables](https://docs.github.com/en/actions/learn-github-actions/variables):
+   they are not sensitive (verification only), and using `vars.*` instead of
+   `secrets.*` makes them visible in logs for easier debugging, at no
+   security cost.
+3. Dependabot and fork PRs skip the gate entirely (above); this is a
+   trust-boundary decision, not just a secrets-availability workaround --
+   even with Dependabot secrets configured, a fork PR's workflow content is
+   attacker-controlled and should not run with signing-key access.
+
+### Release signature verification
+
+`deploy-gate` installs [`sigstore/cosign-installer`](https://github.com/sigstore/cosign-installer)
+(pinned by full commit SHA) before `actions/setup`, and passes
+`verify-signature: "true"` to `actions/setup`. This makes `actions/setup`
+verify the downloaded `checksums.txt` against its cosign sign-blob signature
+and certificate -- checking that the release was actually built and signed
+by devsecops-attestation's own GitHub Actions workflow (via Sigstore's
+keyless OIDC identity binding) -- before any checksum in it is trusted to
+verify the release archive. Without this, checksum verification alone only
+proves the downloaded archive matches its accompanying `checksums.txt`; it
+says nothing about whether that file was ever published by the real
+project.
 
 ---
 
@@ -248,27 +357,51 @@ bash scripts/act-debug.sh
 bash scripts/act-debug.sh deploy-gate
 ```
 
-**`deploy-gate` cannot run under act until a devsecops-attestation `v0.4.0`
-GitHub release actually exists.** Its `actions/setup` step downloads a
-release archive from `MemerGamer/devsecops-attestation`'s GitHub Releases;
-with no `v0.4.0` release published, that download 404s. This is not fixable
-with act's `--local-repository` flag: that flag only changes where the
-*action definition* (`action.yml`) is resolved from, not what
-`actions/setup` downloads at runtime (a plain `curl` against
-`download-base-url` / the release tag). The only way to exercise
-`deploy-gate` locally today is to temporarily edit the workflow so its
-`actions/setup` step uses `version: source` instead of `version: 0.4.0`
-(see `actions/setup/action.yml` in devsecops-attestation), which builds the
-CLI binaries from a local checkout with `go build` instead of downloading a
-release archive. That requires Go on the runner's `PATH`, and the workflow
-edit should be reverted before committing. Otherwise, use
-devsecops-attestation's own `actions/test/run-local.sh` to exercise the
-composite actions' scripts directly against a local build. Once `v0.4.0` is
-released, the pinned `@v0.4.0` steps will resolve normally under act with no
-special handling.
+**`deploy-gate` needs two separate things fixed to run under act before a
+devsecops-attestation `v0.4.0` GitHub release exists**, and they are not the
+same problem:
 
-`scripts/act-debug.sh` also prints this warning at runtime when running the
-full pipeline or the `deploy-gate` job specifically.
+1. **Resolving the action references at all.** CI run 35591276722 failed
+   with `Unable to resolve action ... unable to find version v0.4.0` --
+   act (like GitHub Actions) cannot resolve
+   `uses: MemerGamer/devsecops-attestation/actions/...@v0.4.0` against a
+   `v0.4.0` git ref that does not exist upstream yet, before any step even
+   runs. `scripts/act-debug.sh` fixes this by passing:
+
+   ```
+   --local-repository "MemerGamer/devsecops-attestation@v0.4.0=$ATTESTATION_SRC"
+   ```
+
+   (syntax per `act --help`: `owner/repo@ref=/local/path`, matching that ref
+   on any host/protocol), which redirects that ref to a local checkout
+   instead of trying to fetch it.
+
+2. **`actions/setup` downloading a release archive that does not exist.**
+   Once action resolution succeeds, `actions/setup`'s own `setup.sh` still
+   runs with the pinned `version: 0.4.0` input, which does a plain `curl`
+   for a release archive from GitHub Releases / `download-base-url` -- and
+   that still 404s, `--local-repository` or not, since `--local-repository`
+   only changes where the *action definition* (`action.yml`) resolves from,
+   not what the action's own script downloads at runtime. To exercise
+   `deploy-gate` locally anyway, temporarily change its `actions/setup`
+   step's `version` input from `0.4.0` to `source` in the workflow (see
+   `actions/setup/action.yml` in devsecops-attestation): that makes
+   `setup.sh` build the CLI binaries from the now-locally-resolved checkout
+   with `go build` instead of downloading an archive. This requires a Go
+   toolchain on `PATH` **inside the act job's runner image** -- the default
+   `catthehacker/ubuntu` images do not ship Go, so either use an image that
+   does or add an equivalent install step ahead of it, for local testing
+   only. Revert the `version: source` edit before committing.
+
+Otherwise, use devsecops-attestation's own `actions/test/run-local.sh` to
+exercise the composite actions' scripts directly against a local build.
+Once `v0.4.0` is released, the pinned `@v0.4.0` steps resolve normally both
+under act (via `--local-repository`, or without it once the tag exists) and
+on real GitHub Actions runners, and neither workaround is needed.
+
+`scripts/act-debug.sh` also prints a runtime reminder of point 2 above when
+running the full pipeline or the `deploy-gate` job specifically (point 1 is
+handled unconditionally by the `--local-repository` flag it always passes).
 
 ---
 

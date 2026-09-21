@@ -57,13 +57,19 @@ ENV LC_ALL=en_US.UTF-8
 WORKDIR /app
 
 # Run as non-root user. Ownership of /app itself is fixed up here (mirroring
-# phx.gen.release's generated Dockerfile) so the app user can write to its
-# own working directory at runtime, not just the release files copied into
-# it below.
+# phx.gen.release's generated Dockerfile) so the app user can create new
+# entries in its own working directory at runtime (e.g. the release's tmp/
+# dir, created on boot), without needing to own the release files below.
 RUN useradd --create-home app && chown app:app /app
 USER app
 
-COPY --from=build --chown=app:app /app/_build/prod/rel/demo ./
+# No --chown here: the release files land root-owned (COPY ignores USER and
+# defaults to UID/GID 0 without --chown), so the app user can read and
+# execute them but not modify or replace them at runtime. The app user can
+# still create new files under /app (the release's tmp/ dir on boot,
+# RELEASE_ROOT-relative by default) because /app itself is chown'd to app
+# above; directory write permission, not per-file ownership, governs that.
+COPY --from=build /app/_build/prod/rel/demo ./
 
 ENV PHX_SERVER=true
 

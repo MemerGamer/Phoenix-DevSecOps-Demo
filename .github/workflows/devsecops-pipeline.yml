@@ -18,7 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # Pinned to the postgres:16.15 digest (linux/amd64), resolved via
+        # `docker pull postgres:16.15 && docker inspect --format
+        # '{{index .RepoDigests 0}}' postgres:16.15`. postgres:16 and
+        # postgres:16.15 resolved to the same digest at pin time.
+        image: postgres:16.15@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -32,6 +36,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
         uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
@@ -81,6 +87,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
         uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
@@ -154,6 +162,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Elixir
         uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1.23.0
@@ -220,6 +230,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Run Checkov
         run: |
@@ -264,6 +276,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install gitleaks
         run: |
@@ -304,76 +317,143 @@ jobs:
     # every dependabot PR. Since the job also targets the production
     # environment, an empty run would additionally sit waiting on required
     # reviewers instead of failing fast. Skip the job entirely for
-    # dependabot; the scanner jobs above still run and still report
-    # findings on the PR.
-    if: github.actor != 'dependabot[bot]'
+    # dependabot.
+    #
+    # Fork PRs are also excluded: `pull_request` runs from a fork carry no
+    # repository secrets either (same GitHub behavior as dependabot, minus
+    # the actor check), so a fork PR would hit the same empty-secret abort,
+    # and letting a fork-authored workflow edit reach a job that reads
+    # signing-key secrets is a needless exposure even when the run would
+    # fail anyway. `github.event.pull_request.head.repo.full_name ==
+    # github.repository` is false for a fork PR and absent (so short-circuited
+    # to the push branch) on a plain push. The scanner jobs above are
+    # unaffected and still run and report findings on every PR, including
+    # dependabot's and forks'.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # No actions/checkout: this job only consumes uploaded scan-result
+      # artifacts and produces a fresh attestation chain, and the composite
+      # actions below are referenced remotely (uses:), so nothing in this
+      # job reads from a local checkout of this repository.
 
-      - name: Download all scan results
+      # Written under runner.temp (not the job workspace) so the attestation
+      # chain and gate decision never collide with, or get mistaken for,
+      # checked-out repository content -- there is none, per above. The
+      # `runner` context is not available in a job-level `env:` block, so
+      # the paths are computed here and exported via GITHUB_ENV instead,
+      # for the later steps' `${{ env.* }}` expressions to pick up.
+      - name: Set scratch paths
+        run: |
+          echo "CHAIN_PATH=${RUNNER_TEMP}/attestation-chain.json" >> "$GITHUB_ENV"
+          echo "GATE_OUTPUT_PATH=${RUNNER_TEMP}/gate-decision.json" >> "$GITHUB_ENV"
+
+      # Downloaded into per-check-type directories (not a single
+      # pattern-matched, merge-multiple download into the shared workspace)
+      # so a same-named raw result from one check type can never overwrite,
+      # or be silently shadowed by, another's during download.
+      - name: Download SAST raw result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "*-raw"
-          merge-multiple: true
+          name: sast-raw
+          path: raw/sast
+
+      - name: Download SCA raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sca-raw
+          path: raw/sca
+
+      - name: Download config scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: config-raw
+          path: raw/config
+
+      - name: Download secret scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: secret-raw
+          path: raw/secret
+
+      # Installs cosign so actions/setup's verify-signature: "true" below can
+      # check the downloaded release checksums.txt against its cosign
+      # sign-blob signature and certificate before anything in this job
+      # trusts it. Pinned to sigstore/cosign-installer v4.1.2 by full commit
+      # SHA, resolved via `git ls-remote --tags
+      # https://github.com/sigstore/cosign-installer.git`.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Pin to the release commit SHA once v0.4.0 is published.
       - uses: MemerGamer/devsecops-attestation/actions/setup@v0.4.0
         with:
           version: 0.4.0
+          verify-signature: "true"
 
       # Pin to the release commit SHA once v0.4.0 is published.
       - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: sobelow
-          raw-result: sobelow.json
+          raw-result: raw/sast/sobelow.json
           check-type: sast
           signing-key: ${{ secrets.SAST_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ env.CHAIN_PATH }}
 
       # Pin to the release commit SHA once v0.4.0 is published.
       - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: mix-audit
-          raw-result: mix-audit.json
+          raw-result: raw/sca/mix-audit.json
           check-type: sca
           signing-key: ${{ secrets.SCA_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ env.CHAIN_PATH }}
 
       # Pin to the release commit SHA once v0.4.0 is published.
       - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: checkov
-          raw-result: checkov.json
+          raw-result: raw/config/checkov.json
           check-type: config
           signing-key: ${{ secrets.CONFIG_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ env.CHAIN_PATH }}
 
       # Pin to the release commit SHA once v0.4.0 is published.
       - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: gitleaks
-          raw-result: gitleaks.json
+          raw-result: raw/secret/gitleaks.json
           check-type: secret
           signing-key: ${{ secrets.SECRET_SCANNING_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ env.CHAIN_PATH }}
 
       # Pin to the release commit SHA once v0.4.0 is published.
-      # No --policy / policy-hash: the bundled canonical policy
-      # (policies/deploy.rego in devsecops-attestation, installed by the
-      # setup action) is used as-is.
+      # No --policy / policy-hash: `gate evaluate` with no --policy uses the
+      # canonical deploy.rego policy compiled into the gate binary itself
+      # (policy.DefaultPolicy, embedded from policies/deploy.rego at build
+      # time), not the copy of deploy.rego that actions/setup separately
+      # downloads and installs alongside the binaries. The downloaded copy
+      # is there for inspection, or for a caller that wants to pass it via
+      # --policy explicitly; this workflow does not, so the embedded policy
+      # is what actually evaluates every run.
       #
       # expect: deny -- this demo intentionally ships hardcoded
       # secret_key_base literals in config/dev.exs and config/test.exs
       # (see commit "fix: block deployment on any hardcoded credential
       # finding"). gitleaks findings are always normalized to critical
-      # severity (pkg/normalize's gitleaks adapter), and the bundled
+      # severity (pkg/normalize's gitleaks adapter), and the embedded
       # policy treats "secret" as a zero-tolerance check type, so the
       # gate is expected to deny every run. This demonstrates the
       # pipeline actually blocking on a real finding, not just passing.
+      # Nothing is deployed either way: there is no deploy step in this
+      # workflow. "Deploy Gate" names the security gate a real deploy step
+      # would sit behind; passing this job (an allow decision under
+      # expect: allow, or the expected deny under expect: deny) is the
+      # extent of what the pipeline does.
       - uses: MemerGamer/devsecops-attestation/actions/gate@v0.4.0
         with:
-          chain: attestation-chain.json
+          chain: ${{ env.CHAIN_PATH }}
           authorized-signers: >-
             sast=${{ secrets.SAST_PUBLIC_KEY }},
             sca=${{ secrets.SCA_PUBLIC_KEY }},
@@ -382,11 +462,11 @@ jobs:
           max-age: 24h
           require-log-entries: "true"
           expect: deny
-          output: gate-decision.json
+          output: ${{ env.GATE_OUTPUT_PATH }}
 
       - name: Show gate decision
         if: always()
-        run: cat gate-decision.json
+        run: cat "$GATE_OUTPUT_PATH"
 
       - name: Upload attestation chain & gate decision
         if: always()
@@ -394,5 +474,5 @@ jobs:
         with:
           name: attestation-artifacts
           path: |
-            attestation-chain.json
-            gate-decision.json
+            ${{ env.CHAIN_PATH }}
+            ${{ env.GATE_OUTPUT_PATH }}
