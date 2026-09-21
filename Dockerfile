@@ -1,5 +1,8 @@
 # ── Build stage ───────────────────────────────────────────────────
-FROM hexpm/elixir:1.17.3-erlang-27.1-debian-bookworm-20240904-slim AS build
+# Elixir 1.19 / OTP 28, matching mix.exs (elixir: "~> 1.19") and the CI
+# workflow's erlef/setup-beam versions. Pinned by digest, resolved from
+# hexpm/elixir:1.19.6-erlang-28.5.0.6-debian-bookworm-20260918-slim.
+FROM hexpm/elixir@sha256:8713308eb471a5f84aa55a22cf265d5f652629de747af83b22cc27706fe0c8f6 AS build
 
 WORKDIR /app
 
@@ -28,11 +31,18 @@ RUN mix assets.deploy
 RUN mix compile
 
 COPY config/runtime.exs config/
-COPY rel rel
 RUN mix release
 
 # ── Runtime stage ─────────────────────────────────────────────────
-FROM debian:bookworm-20240904-slim AS runtime
+# Same debian distro (bookworm) as the build stage's base image.
+# Pinned by digest, resolved from debian:bookworm-20260918-slim.
+#
+# No HEALTHCHECK: this is a debian-slim image with no curl/wget
+# installed, and adding one only for a healthcheck would grow the
+# runtime image and its attack surface. Add curl (or a lightweight
+# Elixir-based check via the release's remote console) if a
+# HEALTHCHECK becomes required.
+FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 RUN apt-get update -y && \
     apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates && \
