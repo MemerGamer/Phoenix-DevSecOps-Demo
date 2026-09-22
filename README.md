@@ -93,7 +93,9 @@ policy's defaults currently produces a deny with these reason types:
 - **failed checks** -- one or more check types (in the observed run: sast,
   sca, secret) report an attestation whose `result.passed` is `false`.
 - **findings at or above the blocking severity threshold** (`high` by
-  default) -- Sobelow and mix_audit findings that clear the threshold.
+  default) -- Sobelow, mix_audit, and Gitleaks findings that clear the
+  threshold (Gitleaks findings are always normalized to `critical`
+  severity, so they are counted here too).
 - **hardcoded credential findings** -- Gitleaks findings on the
   zero-tolerance `secret` check type (the `secret_key_base` literals above).
 
@@ -414,11 +416,14 @@ No workaround is required to run `deploy-gate` under act.
 
 (syntax per `act --help`: `owner/repo@ref=/local/path`, matching that ref on
 any host/protocol). This redirects the pinned ref to `$ATTESTATION_SRC`
-instead of fetching it from GitHub, which is only needed to test unreleased
-changes to the composite actions themselves (e.g. editing
-`actions/gate/gate.sh` locally before cutting a new release) -- for anything
-else it is a no-op, since the local checkout at that commit and the released
-ref are identical.
+instead of fetching it from GitHub: act runs whatever is actually in
+`$ATTESTATION_SRC`'s `actions/` directory at the time, regardless of what
+that checkout's working tree or HEAD points at. That only matches the
+released `v0.4.0` behavior when `$ATTESTATION_SRC`'s `actions/` is checked
+out at the pinned commit (`ed0b603...`); this flag is what makes it
+possible to test unreleased changes to the composite actions themselves
+(e.g. editing `actions/gate/gate.sh` locally before cutting a new release)
+by pointing `$ATTESTATION_SRC` at a checkout that differs from that commit.
 
 Otherwise, use devsecops-attestation's own `actions/test/run-local.sh` to
 exercise the composite actions' scripts directly against a local build.
