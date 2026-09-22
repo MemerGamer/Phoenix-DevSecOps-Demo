@@ -91,10 +91,16 @@ Re-simulating the released v0.4.1 action scripts (`normalize-sign` x4 then
 policy's defaults currently produces a deny with these reason types:
 
 - **failed checks** -- one or more check types (in the observed run: sast,
-  sca, secret) report an attestation whose `result.passed` is `false`.
+  secret) report an attestation whose `result.passed` is `false`. SCA
+  contributes to this reason only when `mix_audit` reports advisories for
+  the currently pinned Hex dependencies; with no advisories outstanding, the
+  sca attestation passes and drops out of the failed-checks list, but the
+  secret-scan attestation alone is still enough to deny the gate (see
+  above), so the demo keeps denying either way.
 - **findings at or above the blocking severity threshold** (`high` by
   default) -- Sobelow and Gitleaks findings (Gitleaks findings always
-  normalize to critical), plus any mix_audit advisory rated high or above.
+  normalize to critical), plus any mix_audit advisory rated high or above
+  when one is outstanding.
 - **hardcoded credential findings** -- Gitleaks findings on the
   zero-tolerance `secret` check type (the `secret_key_base` literals above).
 
