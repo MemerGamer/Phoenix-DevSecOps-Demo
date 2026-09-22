@@ -3,10 +3,10 @@
 # Run from the repo root: bash scripts/act-debug.sh [job]
 # If no job is given, runs all jobs in order.
 #
-# devsecops-attestation v0.4.0 is released, so act (like GitHub Actions)
+# devsecops-attestation v0.4.1 is released, so act (like GitHub Actions)
 # resolves the pinned `uses: MemerGamer/devsecops-attestation/actions/...@
 # <release commit SHA>` steps directly against the real repository, and
-# actions/setup's `version: 0.4.0` input downloads the real release archive.
+# actions/setup's `version: 0.4.1` input downloads the real release archive.
 # No workaround is needed to run deploy-gate under act.
 #
 # This script still passes act's --local-repository flag unconditionally
@@ -14,7 +14,7 @@
 # a local checkout instead of fetching it from GitHub, which only matters
 # when testing unreleased changes to the composite actions themselves (e.g.
 # editing actions/gate/gate.sh locally before cutting a new release). It
-# only matches the released v0.4.0 behavior when that checkout's actions/
+# only matches the released v0.4.1 behavior when that checkout's actions/
 # directory is at the pinned commit; otherwise act runs whatever files are
 # currently in that directory, including uncommitted changes.
 set -euo pipefail
@@ -152,7 +152,7 @@ ACT_CMD=(
   # only matches released behavior when the local checkout is at that
   # commit; only needed to test unreleased changes to the composite
   # actions themselves.
-  --local-repository "MemerGamer/devsecops-attestation@ed0b603a70a0146264aa91eecfd17d95eccf9d38=$ATTESTATION_SRC"
+  --local-repository "MemerGamer/devsecops-attestation@43a819d52e705bbd2aad2e6be5c34bf9584880af=$ATTESTATION_SRC"
 )
 
 if [ -n "$JOB" ]; then

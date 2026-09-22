@@ -79,14 +79,14 @@ every run. This demo intentionally ships hardcoded `secret_key_base` literals
 in `config/dev.exs` and `config/test.exs` (see git history: "fix: block
 deployment on any hardcoded credential finding"). Gitleaks findings are
 always normalized to `critical` severity, and the policy compiled into the
-`gate` binary (v0.4.0 defaults: `fail_on_severity: high`, `zero_tolerance_checks:
+`gate` binary (v0.4.1 defaults: `fail_on_severity: high`, `zero_tolerance_checks:
 secret`, `required_checks: sast, sca, config, secret`) treats the `secret`
 check type as zero-tolerance (any finding, any severity, blocks deployment)
 as well as blocking any high-or-above severity finding outright. So the
 secret-scan attestation alone is enough to deny the gate, regardless of what
 SAST, SCA, or config-scan find.
 
-Re-simulating the released v0.4.0 action scripts (`normalize-sign` x4 then
+Re-simulating the released v0.4.1 action scripts (`normalize-sign` x4 then
 `gate`) against this pipeline's raw scan artifacts against the bundled
 policy's defaults currently produces a deny with these reason types:
 
@@ -401,25 +401,25 @@ bash scripts/act-debug.sh
 bash scripts/act-debug.sh deploy-gate
 ```
 
-`devsecops-attestation` `v0.4.0` is released, so act (like GitHub Actions)
-resolves `uses: MemerGamer/devsecops-attestation/actions/...@ed0b603...`
+`devsecops-attestation` `v0.4.1` is released, so act (like GitHub Actions)
+resolves `uses: MemerGamer/devsecops-attestation/actions/...@43a819d5...`
 (the pinned release commit SHA) directly against the real repository, and
-`actions/setup`'s `version: 0.4.0` input downloads the real release archive.
+`actions/setup`'s `version: 0.4.1` input downloads the real release archive.
 No workaround is required to run `deploy-gate` under act.
 
 `scripts/act-debug.sh` still passes `--local-repository` unconditionally:
 
 ```
---local-repository "MemerGamer/devsecops-attestation@ed0b603...=$ATTESTATION_SRC"
+--local-repository "MemerGamer/devsecops-attestation@43a819d5...=$ATTESTATION_SRC"
 ```
 
 (syntax per `act --help`: `owner/repo@ref=/local/path`, matching that ref on
 any host/protocol). This redirects the pinned ref to `$ATTESTATION_SRC`
 instead of fetching it from GitHub: act runs the files currently in that
 `actions/` directory, including uncommitted changes, regardless of what
-HEAD or the pinned ref points at. It only matches released `v0.4.0`
+HEAD or the pinned ref points at. It only matches released `v0.4.1`
 behavior when `$ATTESTATION_SRC`'s `actions/` is checked out at the pinned
-commit (`ed0b603...`); this flag is what makes it possible to test
+commit (`43a819d5...`); this flag is what makes it possible to test
 unreleased changes to the composite actions themselves (e.g. editing
 `actions/gate/gate.sh` locally before cutting a new release) by pointing
 `$ATTESTATION_SRC` at a checkout that differs from that commit.
@@ -436,9 +436,9 @@ so they run unmodified on Forgejo Actions runners. On Forgejo, reference them
 by full URL instead of the GitHub `owner/repo` shorthand:
 
 ```yaml
-- uses: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/actions/setup@v0.4.0
+- uses: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/actions/setup@v0.4.1
   with:
-    version: 0.4.0
+    version: 0.4.1
     download-base-url: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/releases/download
 ```
 
