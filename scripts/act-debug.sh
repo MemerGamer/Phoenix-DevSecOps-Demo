@@ -13,9 +13,10 @@
 # (pointed at $ATTESTATION_SRC): it redirects the pinned "owner/repo@ref" to
 # a local checkout instead of fetching it from GitHub, which only matters
 # when testing unreleased changes to the composite actions themselves (e.g.
-# editing actions/gate/gate.sh locally before cutting a new release). For
-# anything else it is a no-op, since the local checkout at that commit and
-# the released ref are identical.
+# editing actions/gate/gate.sh locally before cutting a new release). It
+# only matches the released v0.4.0 behavior when that checkout's actions/
+# directory is at the pinned commit; otherwise act runs whatever files are
+# currently in that directory, including uncommitted changes.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -147,9 +148,10 @@ ACT_CMD=(
   # Redirects the pinned MemerGamer/devsecops-attestation/actions/...@<release
   # commit SHA> steps to the local checkout instead of fetching them from
   # GitHub (see the header comment). Syntax per `act --help`:
-  # "owner/repo@ref=/local/path" matches that ref on any host/protocol. A
-  # no-op when the local checkout matches the released ref; only needed to
-  # test unreleased changes to the composite actions themselves.
+  # "owner/repo@ref=/local/path" matches that ref on any host/protocol. It
+  # only matches released behavior when the local checkout is at that
+  # commit; only needed to test unreleased changes to the composite
+  # actions themselves.
   --local-repository "MemerGamer/devsecops-attestation@ed0b603a70a0146264aa91eecfd17d95eccf9d38=$ATTESTATION_SRC"
 )
 

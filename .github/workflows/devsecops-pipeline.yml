@@ -131,7 +131,7 @@ jobs:
           # false, so a clean scan already exits 0; the `|| true` only
           # tolerates a scan-time crash so the file-exists check below
           # fails with a clear message instead of an opaque step failure.
-          # Sobelow 0.14.1 (the version pinned in mix.lock) supports
+          # Sobelow 0.15.0 (the version pinned in mix.lock) supports
           # --out to write the report directly to a file, so the JSON
           # never touches stdout in the first place; the compile step
           # above still guards against any other tool printing to
@@ -280,7 +280,8 @@ jobs:
 
       - name: Install gitleaks
         run: |
-          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --connect-timeout 20 --max-time 300 -O \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c -
           tar xz -f "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
