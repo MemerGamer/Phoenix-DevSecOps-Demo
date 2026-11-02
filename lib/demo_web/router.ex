@@ -1,13 +1,23 @@
 defmodule DemoWeb.Router do
   use DemoWeb, :router
 
+  # No inline scripts or style attributes are used, so 'unsafe-inline' is not
+  # needed. LiveView connects back to the same origin over ws/wss.
+  # Kept as a plain string literal so Sobelow (Config.CSP) can inspect it.
+  @secure_headers %{
+    "content-security-policy" =>
+      "default-src 'self'; script-src 'self'; style-src 'self'; \
+      img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; \
+      object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+  }
+
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
     plug :fetch_live_flash
     plug :put_root_layout, html: {DemoWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    plug :put_secure_browser_headers, @secure_headers
   end
 
   pipeline :api do
