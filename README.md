@@ -381,6 +381,33 @@ mix deps.audit
 mix precommit
 ```
 
+### Local development (Docker only)
+
+Local development is Docker-only. The host Erlang may lack the `public_key` application, so `mix` is run inside the same `hexpm/elixir` image the `Dockerfile` builds from, next to a `postgres:16` container. The credentials below match `config/dev.exs` and `config/test.exs` (`postgres`/`postgres`, host `localhost`).
+
+```bash
+# 1. Start Postgres
+docker run -d --name demo-pg -e POSTGRES_PASSWORD=postgres postgres:16
+
+# 2. Run mix in the Elixir image. --network container:demo-pg shares the
+#    Postgres container's network namespace, so `localhost` in the config
+#    reaches the database. git and build-essential are needed for the
+#    heroicons git dependency.
+docker run --rm --network container:demo-pg -v "$PWD":/app -w /app -e MIX_ENV=test \
+  hexpm/elixir:1.19.6-erlang-28.5.0.6-debian-bookworm-20260918-slim \
+  bash -c 'apt-get update && apt-get install -y git build-essential \
+    && mix local.hex --force && mix local.rebar --force \
+    && mix deps.get && mix compile --warnings-as-errors && mix test'
+
+# 3. Clean up
+docker rm -f demo-pg
+```
+
+Notes:
+
+- Files written to the bind mount (`deps/`, `_build/`) are owned by root; `sudo chown -R "$USER" deps _build` if needed.
+- Before the dev server renders without a 404 for `assets/js/theme.js`, build the assets with `mix assets.build` (run it the same way as above).
+
 ### Local pipeline simulation (act)
 
 Prerequisites:
