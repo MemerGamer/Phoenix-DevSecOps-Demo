@@ -394,7 +394,7 @@ jobs:
           verify-signature: "true"
 
       # SHA and version must be bumped together when upgrading.
-      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: sobelow
           raw-result: raw/sast/sobelow.json
@@ -403,7 +403,7 @@ jobs:
           chain: ${{ env.CHAIN_PATH }}
 
       # SHA and version must be bumped together when upgrading.
-      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: mix-audit
           raw-result: raw/sca/mix-audit.json
@@ -412,7 +412,7 @@ jobs:
           chain: ${{ env.CHAIN_PATH }}
 
       # SHA and version must be bumped together when upgrading.
-      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: checkov
           raw-result: raw/config/checkov.json
@@ -421,7 +421,7 @@ jobs:
           chain: ${{ env.CHAIN_PATH }}
 
       # SHA and version must be bumped together when upgrading.
-      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+      - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: gitleaks
           raw-result: raw/secret/gitleaks.json
