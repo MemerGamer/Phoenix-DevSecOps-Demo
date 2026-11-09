@@ -42,7 +42,7 @@ RUN mix release
 # runtime image and its attack surface. Add curl (or a lightweight
 # Elixir-based check via the release's remote console) if a
 # HEALTHCHECK becomes required.
-FROM debian:bookworm-20261020-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
+FROM debian:bookworm-20261027-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS runtime
 
 RUN apt-get update -y && \
     apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates && \
