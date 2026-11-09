@@ -452,7 +452,7 @@ jobs:
       # would sit behind; passing this job (an allow decision under
       # expect: allow, or the expected deny under expect: deny) is the
       # extent of what the pipeline does.
-      - uses: MemerGamer/devsecops-attestation/actions/gate@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+      - uses: MemerGamer/devsecops-attestation/actions/gate@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           chain: ${{ env.CHAIN_PATH }}
           authorized-signers: >-
