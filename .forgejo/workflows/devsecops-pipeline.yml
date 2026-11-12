@@ -5,6 +5,13 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# Forgejo cancels a running invocation of the same workflow on a new event
+# by default; let every run finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -15,7 +22,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   build:
     name: Build & Test
-    runs-on: ubuntu-latest
+    # Forgejo port: the runner derives ImageOS from the label name
+    # (ubuntu-latest gives "ubuntu20", so erlef/setup-beam installs an OTP
+    # built for 20.04 that needs libssl1.1). ubuntu-22.04 gives "ubuntu22".
+    runs-on: ubuntu-22.04
     services:
       postgres:
         # Pinned to the postgres:16.15 multi-arch index digest, resolved via
@@ -27,7 +37,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: demo_test
-        ports: ["5432:5432"]
+        # Forgejo port: no port binding; the job reaches the service by its
+        # name (DB_HOST below).
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -68,6 +79,7 @@ jobs:
         run: mix test
         env:
           MIX_ENV: test
+          DB_HOST: postgres
 
   # ─────────────────────────────────────────────────────────────────
   # 2. SAST - Sobelow (Elixir/Phoenix security scanner)
@@ -82,7 +94,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   sast:
     name: SAST (Sobelow)
-    runs-on: ubuntu-latest
+    # Forgejo port: the runner derives ImageOS from the label name
+    # (ubuntu-latest gives "ubuntu20", so erlef/setup-beam installs an OTP
+    # built for 20.04 that needs libssl1.1). ubuntu-22.04 gives "ubuntu22".
+    runs-on: ubuntu-22.04
     needs: build
 
     steps:
@@ -147,7 +162,7 @@ jobs:
           fi
 
       - name: Upload SAST raw result
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5 (Forgejo fork; upstream v4+ is not supported on Forgejo)
         with:
           name: sast-raw
           path: results/sobelow.json
@@ -157,7 +172,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   sca:
     name: SCA (mix audit)
-    runs-on: ubuntu-latest
+    # Forgejo port: the runner derives ImageOS from the label name
+    # (ubuntu-latest gives "ubuntu20", so erlef/setup-beam installs an OTP
+    # built for 20.04 that needs libssl1.1). ubuntu-22.04 gives "ubuntu22".
+    runs-on: ubuntu-22.04
     needs: build
 
     steps:
@@ -215,7 +233,7 @@ jobs:
           fi
 
       - name: Upload SCA raw result
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5 (Forgejo fork; upstream v4+ is not supported on Forgejo)
         with:
           name: sca-raw
           path: results/mix-audit.json
@@ -239,7 +257,12 @@ jobs:
           # Pinned to the latest release resolved from
           # https://pypi.org/pypi/checkov/json at the time this workflow
           # was last updated.
-          pip install --quiet checkov==3.3.19
+          # Forgejo port: the job image (Ubuntu 24.04) enforces PEP 668 and its
+          # Debian-installed Python packages cannot be upgraded by pip, so
+          # checkov goes into its own virtual environment.
+          python3 -m venv "$RUNNER_TEMP/venv-checkov" 2>/dev/null || { apt-get update -qq && apt-get install -y -qq python3-venv >/dev/null && python3 -m venv "$RUNNER_TEMP/venv-checkov"; }
+          "$RUNNER_TEMP/venv-checkov/bin/pip" install --quiet checkov==3.3.19
+          export PATH="$RUNNER_TEMP/venv-checkov/bin:$PATH"
           checkov -d . \
             --skip-path deps \
             --skip-path _build \
@@ -254,7 +277,7 @@ jobs:
           mv results/results_json.json results/checkov.json
 
       - name: Upload config scan raw result
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5 (Forgejo fork; upstream v4+ is not supported on Forgejo)
         with:
           name: config-raw
           path: results/checkov.json
@@ -296,7 +319,7 @@ jobs:
           fi
 
       - name: Upload secret scan raw result
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5 (Forgejo fork; upstream v4+ is not supported on Forgejo)
         with:
           name: secret-raw
           path: results/gitleaks.json
@@ -311,7 +334,8 @@ jobs:
     name: Attest & Deploy Gate
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
-    environment: production
+    # Forgejo port: `environment:` is ignored by Forgejo Actions, so it is
+    # dropped; the keys are repository secrets.
     # Dependabot-triggered runs do not get repository secrets (GitHub
     # withholds them from the dependabot actor for security), so every
     # signing-key input below would be empty and this job would abort on
@@ -330,9 +354,11 @@ jobs:
     # to the push branch) on a plain push. The scanner jobs above are
     # unaffected and still run and report findings on every PR, including
     # dependabot's and forks'.
+    # Forgejo port: workflow_dispatch was added above, so it is admitted here
+    # too (otherwise a manual run skips signing and the gate).
     if: >-
       github.actor != 'dependabot[bot]' &&
-      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
       # No actions/checkout: this job only consumes uploaded scan-result
@@ -356,25 +382,25 @@ jobs:
       # so a same-named raw result from one check type can never overwrite,
       # or be silently shadowed by, another's during download.
       - name: Download SAST raw result
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: https://data.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7 (Forgejo fork)
         with:
           name: sast-raw
           path: raw/sast
 
       - name: Download SCA raw result
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: https://data.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7 (Forgejo fork)
         with:
           name: sca-raw
           path: raw/sca
 
       - name: Download config scan raw result
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: https://data.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7 (Forgejo fork)
         with:
           name: config-raw
           path: raw/config
 
       - name: Download secret scan raw result
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: https://data.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7 (Forgejo fork)
         with:
           name: secret-raw
           path: raw/secret
@@ -385,6 +411,10 @@ jobs:
       # trusts it. Pinned to sigstore/cosign-installer v4.1.2 by full commit
       # SHA, resolved via `git ls-remote --tags
       # https://github.com/sigstore/cosign-installer.git`.
+      # Forgejo port: cosign-installer calls envsubst, which the job image
+      # lacks.
+      - name: Install envsubst for cosign-installer
+        run: command -v envsubst || (apt-get update -qq && apt-get install -y -qq gettext-base >/dev/null)
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # SHA and version must be bumped together when upgrading.
@@ -392,6 +422,9 @@ jobs:
         with:
           version: 0.4.1
           verify-signature: "true"
+          # Forgejo port: the default base URL is built from github.server_url,
+          # which is the Forgejo instance here; the releases stay on GitHub.
+          download-base-url: https://github.com/MemerGamer/devsecops-attestation/releases/download
 
       # SHA and version must be bumped together when upgrading.
       - uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
@@ -471,7 +504,7 @@ jobs:
 
       - name: Upload attestation chain & gate decision
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5 (Forgejo fork; upstream v4+ is not supported on Forgejo)
         with:
           name: attestation-artifacts
           path: |

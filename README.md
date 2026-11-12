@@ -25,6 +25,18 @@ is as far as this demo goes.
 
 ---
 
+## Where this repository lives (since 2026-11-14)
+
+- **Canonical repository:** [Forgejo `kbalinthunor/Phoenix-DevSecOps-Demo`](https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/Phoenix-DevSecOps-Demo). CI runs on Forgejo Actions (`.forgejo/workflows/devsecops-pipeline.yml`).
+- **GitHub (`MemerGamer/Phoenix-DevSecOps-Demo`) is a read-only push mirror.** Nobody pushes to GitHub for this repository, neither the owner nor agents: Forgejo force-pushes to it and deletes refs that exist only on GitHub, so any push, web edit, merge or bot commit made there is overwritten or deleted at the next mirror sync.
+- **Issues and pull requests:** the GitHub ones (#1 to #41) are an archive only and are cited as `GH#n`; merging one of them on GitHub would be undone by the next sync. New issues and pull requests go to Forgejo and are cited as `FJ#n`.
+- **Dependabot** is switched off (its configuration file was removed at the cutover). Dependency updates move to Renovate on Forgejo.
+- **History:** the last commit that ran the GitHub Actions pipeline is tagged `forgejo-cutover/last-github-ci`; the GitHub Actions run history stays on GitHub.
+- **Documented deviation (accepted 2026-11-12):** `config/test.exs` reads the database host from `DB_HOST` (default `localhost`, unchanged for local development). The Forgejo Actions job reaches the Postgres service by its name, so the workflow sets `DB_HOST: postgres`.
+- **Signing keys:** pipeline runs on Forgejo sign their attestations with test keys, which differ from the keys of the GitHub period, until the signing job is isolated. The "CI/CD setup (GitHub Actions)" section below describes the GitHub period; on Forgejo the same eight secret names are repository secrets.
+
+---
+
 ## Pipeline overview
 
 ```mermaid
